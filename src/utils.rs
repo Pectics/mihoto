@@ -56,6 +56,112 @@ pub fn create_parent_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
+pub fn create_private_parent_dir(path: &Path) -> Result<()> {
+    create_parent_dir(path)?;
+    if let Some(parent) = path.parent() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    Ok(())
+}
+
+pub fn set_private_file_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+pub fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    create_private_parent_dir(path)?;
+    fs::write(path, bytes)?;
+    set_private_file_permissions(path)
+}
+
+pub fn redact_sensitive(input: &str) -> String {
+    let mut redacted = input.to_string();
+    for token in input.split_whitespace() {
+        if let Ok(sanitized) = redact_url_token(token) {
+            if sanitized != token {
+                redacted = redacted.replace(token, &sanitized);
+            }
+        }
+    }
+    redact_label_value(&redacted, "secret:")
+}
+
+fn redact_url_token(token: &str) -> Result<String, ()> {
+    let trimmed = token.trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | ')' | '('));
+    let mut url = reqwest::Url::parse(trimmed).map_err(|_| ())?;
+    if !url.username().is_empty() || url.password().is_some() {
+        let _ = url.set_username("***");
+        let _ = url.set_password(None);
+    }
+
+    let pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .map(|(key, value)| {
+            let key_string = key.to_string();
+            let value_string = if is_sensitive_key(&key_string) {
+                "***".to_string()
+            } else {
+                value.to_string()
+            };
+            (key_string, value_string)
+        })
+        .collect();
+
+    if !pairs.is_empty() {
+        url.query_pairs_mut().clear().extend_pairs(
+            pairs
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str())),
+        );
+    }
+
+    Ok(token.replace(trimmed, url.as_ref()))
+}
+
+fn is_sensitive_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "token" | "access_token" | "secret" | "password" | "passwd" | "key" | "apikey" | "api_key"
+    )
+}
+
+fn redact_label_value(input: &str, label: &str) -> String {
+    let mut output = input.to_string();
+    let mut search_from = 0usize;
+    while let Some(relative_idx) = output[search_from..].find(label) {
+        let label_start = search_from + relative_idx;
+        let value_start = label_start + label.len();
+        let spaces = output[value_start..]
+            .chars()
+            .take_while(|c| c.is_whitespace())
+            .map(char::len_utf8)
+            .sum::<usize>();
+        let value_start = value_start + spaces;
+        let value_len = output[value_start..]
+            .chars()
+            .take_while(|c| !c.is_whitespace() && *c != ',')
+            .map(char::len_utf8)
+            .sum::<usize>();
+        if value_len == 0 {
+            search_from = value_start;
+            continue;
+        }
+        let value_end = value_start + value_len;
+        output.replace_range(value_start..value_end, "***");
+        search_from = value_start + 3;
+    }
+    output
+}
+
 fn github_mirror_base() -> Option<String> {
     let mirror = std::env::var(MIHORO_GITHUB_MIRROR_ENV).ok()?;
     let mirror = mirror.trim().trim_end_matches('/').to_string();
@@ -157,7 +263,12 @@ async fn download_file_once(
         .header("User-Agent", user_agent)
         .send()
         .await
-        .with_context(|| format!("failed to GET from '{}'", resolved_url.as_ref()))?;
+        .with_context(|| {
+            format!(
+                "failed to GET from '{}'",
+                redact_sensitive(resolved_url.as_ref())
+            )
+        })?;
     res.error_for_status_ref()?;
 
     // If content length is not available or 0, use a spinner instead of a progress bar
@@ -181,7 +292,8 @@ async fn download_file_once(
     }
     pb.set_prefix(DETAIL_PREFIX);
 
-    let truncated_url = Truncatable::from(url)
+    let redacted_url = redact_sensitive(url);
+    let truncated_url = Truncatable::from(redacted_url.as_str())
         .truncator("...".into())
         .truncate(64)
         .underline();
@@ -312,6 +424,42 @@ mod tests {
         let parent = nested_path.parent().unwrap();
         assert!(parent.exists());
         Ok(())
+    }
+
+    #[test]
+    fn test_write_private_file_creates_private_parent_and_file() -> Result<()> {
+        let dir = tempdir()?;
+        let file_path = dir.path().join("private/config.yaml");
+
+        write_private_file(&file_path, b"secret: token\n")?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let dir_mode = fs::metadata(file_path.parent().unwrap())?
+                .permissions()
+                .mode()
+                & 0o777;
+            let file_mode = fs::metadata(&file_path)?.permissions().mode() & 0o777;
+            assert_eq!(dir_mode, 0o700);
+            assert_eq!(file_mode, 0o600);
+        }
+        assert_eq!(fs::read_to_string(&file_path)?, "secret: token\n");
+        Ok(())
+    }
+
+    #[test]
+    fn test_redact_sensitive_hides_credentials_and_tokens() {
+        let redacted = redact_sensitive(
+            "GET https://user:pass@example.com/sub?token=abc&foo=bar secret: hunter2",
+        );
+
+        assert!(!redacted.contains("user:pass"));
+        assert!(!redacted.contains("token=abc"));
+        assert!(!redacted.contains("hunter2"));
+        assert!(redacted.contains("https://***@example.com/sub?token=***&foo=bar"));
+        assert!(redacted.contains("secret: ***"));
     }
 
     #[test]

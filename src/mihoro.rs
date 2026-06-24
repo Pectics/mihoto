@@ -7,8 +7,8 @@ use crate::resolve_mihomo_bin;
 use crate::systemctl::Systemctl;
 use crate::ui::{install_ui, resolve_external_ui_path};
 use crate::utils::{
-    create_parent_dir, delete_file, download_file, extract_gzip, try_decode_base64_file_inplace,
-    DETAIL_PREFIX,
+    create_parent_dir, create_private_parent_dir, delete_file, download_file, extract_gzip,
+    redact_sensitive, try_decode_base64_file_inplace, DETAIL_PREFIX,
 };
 
 use anyhow::Error;
@@ -112,7 +112,7 @@ impl Mihoro {
             .map_err(|err| {
                 anyhow!(
                     "failed to validate candidate config with `{}`: {}",
-                    self.mihomo_target_binary_path,
+                    redact_sensitive(&self.mihomo_target_binary_path),
                     err
                 )
             })?;
@@ -126,8 +126,8 @@ impl Mihoro {
         Err(anyhow!(
             "candidate config validation failed with status {}\nstdout:\n{}\nstderr:\n{}",
             output.status,
-            stdout.trim(),
-            stderr.trim()
+            redact_sensitive(stdout.trim()),
+            redact_sensitive(stderr.trim())
         ))
     }
 
@@ -212,7 +212,7 @@ impl Mihoro {
             };
         }
 
-        create_parent_dir(&store.paths.source_yaml)?;
+        create_private_parent_dir(&store.paths.source_yaml)?;
         let staged_source = NamedTempFile::new_in(&store.paths.root)?;
         download_file(
             client,
@@ -456,7 +456,7 @@ impl Mihoro {
         store.seed_source_from_legacy_config()?;
 
         // Download remote mihomo config and apply override
-        create_parent_dir(&store.paths.source_yaml)?;
+        create_private_parent_dir(&store.paths.source_yaml)?;
         let staged_source = NamedTempFile::new_in(&store.paths.root)?;
         download_file(
             client,

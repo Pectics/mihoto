@@ -1,11 +1,13 @@
 use crate::ui::{default_ui, Ui};
-use crate::utils::create_parent_dir;
+use crate::utils::{create_parent_dir, write_private_file};
 
-use std::{collections::HashMap, fs, path::Path};
+use std::{collections::HashMap, env, fs, net::IpAddr, path::Path};
 
 use anyhow::{bail, Result};
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
+
+pub const ALLOW_INSECURE_CONTROLLER_ENV: &str = "MIHORO_ALLOW_INSECURE_CONTROLLER";
 
 /// Mihomo release channel for automatic binary fetching.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
@@ -92,7 +94,7 @@ impl Default for MihomoConfig {
             mode: MihomoMode::Rule,
             log_level: MihomoLogLevel::Info,
             ipv6: Some(true),
-            external_controller: Some(String::from("0.0.0.0:9090")),
+            external_controller: Some(String::from("127.0.0.1:9090")),
             external_ui: Some(String::from("ui")),
             secret: None,
             geodata_mode: Some(false),
@@ -158,7 +160,7 @@ impl Config {
 
     pub fn write(&mut self, path: &Path) -> Result<()> {
         let serialized_config = toml::to_string(&self)?;
-        fs::write(path, serialized_config)?;
+        write_private_file(path, serialized_config.as_bytes())?;
         Ok(())
     }
 }
@@ -175,7 +177,6 @@ pub fn load_config(path: &str) -> Result<Option<Config>> {
 /// Write default config to path if it does not exist.  Returns `true` if the file was created.
 pub fn write_default_if_missing(path: &str) -> Result<bool> {
     let config_path = Path::new(path);
-    create_parent_dir(config_path)?;
     if config_path.exists() {
         return Ok(false);
     }
@@ -196,7 +197,59 @@ pub fn validate_config(config: &Config) -> Result<()> {
             bail!("`{}` undefined", field);
         }
     }
+    validate_controller_security(config)?;
     Ok(())
+}
+
+fn validate_controller_security(config: &Config) -> Result<()> {
+    let Some(controller) = config.mihomo_config.external_controller.as_deref() else {
+        return Ok(());
+    };
+    if controller.trim().is_empty() {
+        return Ok(());
+    }
+    if controller_is_loopback(controller) {
+        return Ok(());
+    }
+    if config
+        .mihomo_config
+        .secret
+        .as_deref()
+        .is_some_and(|secret| !secret.trim().is_empty())
+    {
+        return Ok(());
+    }
+    if env::var(ALLOW_INSECURE_CONTROLLER_ENV).as_deref() == Ok("1") {
+        return Ok(());
+    }
+    bail!(
+        "`mihomo_config.external_controller` binds to a non-loopback address; set \
+         `mihomo_config.secret` or export {}=1 to allow this insecure controller",
+        ALLOW_INSECURE_CONTROLLER_ENV
+    )
+}
+
+fn controller_is_loopback(controller: &str) -> bool {
+    let Some(host) = controller_host(controller) else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+fn controller_host(controller: &str) -> Option<&str> {
+    let controller = controller
+        .trim()
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .trim_end_matches('/');
+    if let Some(rest) = controller.strip_prefix('[') {
+        let (host, _) = rest.split_once(']')?;
+        return Some(host);
+    }
+    controller.rsplit_once(':').map(|(host, _)| host)
 }
 
 /// Tries to parse mihoro config as toml from path.
@@ -323,8 +376,7 @@ pub fn render_mihomo_overlay(path: &Path, override_config: &MihomoConfig) -> Res
         }
     }
 
-    create_parent_dir(path)?;
-    fs::write(path, serialized_overlay)?;
+    write_private_file(path, serialized_overlay.as_bytes())?;
     Ok(true)
 }
 
@@ -364,8 +416,7 @@ pub fn render_mihomo_override(
         }
     }
 
-    create_parent_dir(output_path)?;
-    fs::write(output_path, serialized_mihomo_yaml)?;
+    write_private_file(output_path, serialized_mihomo_yaml.as_bytes())?;
     Ok(true)
 }
 
@@ -413,6 +464,14 @@ mod tests {
     }
 
     #[test]
+    fn test_default_controller_is_loopback() {
+        assert_eq!(
+            Config::new().mihomo_config.external_controller.as_deref(),
+            Some("127.0.0.1:9090")
+        );
+    }
+
+    #[test]
     fn test_parse_config_validates_required_fields() -> Result<()> {
         let dir = tempdir()?;
         let config_path = dir.path().join("test.toml");
@@ -432,6 +491,23 @@ mod tests {
             .contains("remote_config_url"));
 
         Ok(())
+    }
+
+    #[test]
+    fn test_validate_config_rejects_non_loopback_controller_without_secret() {
+        let mut config = Config::new();
+        config.remote_config_url = "http://example.com/config.yaml".to_string();
+        config.mihomo_config.external_controller = Some("0.0.0.0:9090".to_string());
+        config.mihomo_config.secret = None;
+
+        let err = validate_config(&config).unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("mihomo_config.external_controller"));
+        assert!(err
+            .to_string()
+            .contains("MIHORO_ALLOW_INSECURE_CONTROLLER=1"));
     }
 
     #[test]
@@ -486,7 +562,7 @@ mod tests {
             mode: rule
             log-level: info
             ipv6: true
-            external-controller: 0.0.0.0:9090
+            external-controller: 127.0.0.1:9090
             external-ui: ui
             geodata-mode: false
             geo-auto-update: true
