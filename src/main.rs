@@ -1,5 +1,6 @@
 mod cmd;
 mod config;
+mod config_store;
 mod cron;
 mod init;
 mod mihoro;

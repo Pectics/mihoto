@@ -293,8 +293,47 @@ pub struct MihomoYamlConfig {
 /// * Fields not supported by `mihoro` will be kept as is.
 ///
 /// Returns `true` when the file contents had to change.
-pub fn apply_mihomo_override(path: &str, override_config: &MihomoConfig) -> Result<bool> {
-    let raw_mihomo_yaml = fs::read_to_string(path)?;
+pub fn render_mihomo_overlay(path: &Path, override_config: &MihomoConfig) -> Result<bool> {
+    let overlay = MihomoYamlConfig {
+        port: Some(override_config.port),
+        socks_port: Some(override_config.socks_port),
+        mixed_port: override_config.mixed_port,
+        redir_port: override_config.redir_port,
+        allow_lan: override_config.allow_lan,
+        bind_address: override_config.bind_address.clone(),
+        mode: Some(override_config.mode.clone()),
+        log_level: Some(override_config.log_level.clone()),
+        ipv6: override_config.ipv6,
+        external_controller: override_config.external_controller.clone(),
+        external_ui: override_config.external_ui.clone(),
+        secret: override_config.secret.clone(),
+        geodata_mode: override_config.geodata_mode,
+        geo_auto_update: override_config.geo_auto_update,
+        geo_update_interval: override_config.geo_update_interval,
+        geox_url: override_config.geox_url.clone(),
+        extra: HashMap::new(),
+    };
+
+    let serialized_overlay = serde_yaml::to_string(&overlay)?;
+    if let Ok(existing) = fs::read_to_string(path) {
+        let existing_value: serde_yaml::Value = serde_yaml::from_str(&existing)?;
+        let overlay_value: serde_yaml::Value = serde_yaml::from_str(&serialized_overlay)?;
+        if existing_value == overlay_value {
+            return Ok(false);
+        }
+    }
+
+    create_parent_dir(path)?;
+    fs::write(path, serialized_overlay)?;
+    Ok(true)
+}
+
+pub fn render_mihomo_override(
+    source_path: &Path,
+    output_path: &Path,
+    override_config: &MihomoConfig,
+) -> Result<bool> {
+    let raw_mihomo_yaml = fs::read_to_string(source_path)?;
     let mut mihomo_yaml: MihomoYamlConfig = serde_yaml::from_str(&raw_mihomo_yaml)?;
 
     // Apply config overrides
@@ -317,14 +356,23 @@ pub fn apply_mihomo_override(path: &str, override_config: &MihomoConfig) -> Resu
 
     // Avoid rewriting already-current YAML just because formatting or map order changed.
     let serialized_mihomo_yaml = serde_yaml::to_string(&mihomo_yaml)?;
-    let raw_value: serde_yaml::Value = serde_yaml::from_str(&raw_mihomo_yaml)?;
-    let serialized_value: serde_yaml::Value = serde_yaml::from_str(&serialized_mihomo_yaml)?;
-    if raw_value == serialized_value {
-        return Ok(false);
+    if let Ok(current_output) = fs::read_to_string(output_path) {
+        let raw_value: serde_yaml::Value = serde_yaml::from_str(&current_output)?;
+        let serialized_value: serde_yaml::Value = serde_yaml::from_str(&serialized_mihomo_yaml)?;
+        if raw_value == serialized_value {
+            return Ok(false);
+        }
     }
 
-    fs::write(path, serialized_mihomo_yaml)?;
+    create_parent_dir(output_path)?;
+    fs::write(output_path, serialized_mihomo_yaml)?;
     Ok(true)
+}
+
+#[allow(dead_code)]
+pub fn apply_mihomo_override(path: &str, override_config: &MihomoConfig) -> Result<bool> {
+    let path = Path::new(path);
+    render_mihomo_override(path, path, override_config)
 }
 
 #[cfg(test)]
