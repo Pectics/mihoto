@@ -85,6 +85,52 @@ impl Mihoro {
         ConfigGenerationStore::new(&self.mihomo_target_config_root)
     }
 
+    pub fn mihomo_binary_exists(&self) -> bool {
+        fs::metadata(&self.mihomo_target_binary_path).is_ok()
+    }
+
+    fn activate_candidate_config(&self) -> Result<bool> {
+        let store = self.config_generation_store();
+        if store.candidate_matches_active_and_compat()? {
+            return Ok(false);
+        }
+        self.validate_candidate_config()?;
+        store.activate_candidate()
+    }
+
+    fn validate_candidate_config(&self) -> Result<()> {
+        let store = self.config_generation_store();
+        let candidate_path = store
+            .paths
+            .candidate_yaml
+            .to_str()
+            .ok_or_else(|| anyhow!("candidate config path is not valid UTF-8"))?;
+        let args = candidate_validation_args(&self.mihomo_target_config_root, candidate_path);
+        let output = Command::new(&self.mihomo_target_binary_path)
+            .args(&args)
+            .output()
+            .map_err(|err| {
+                anyhow!(
+                    "failed to validate candidate config with `{}`: {}",
+                    self.mihomo_target_binary_path,
+                    err
+                )
+            })?;
+
+        if output.status.success() {
+            return Ok(());
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(anyhow!(
+            "candidate config validation failed with status {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            stdout.trim(),
+            stderr.trim()
+        ))
+    }
+
     /// Stage 1 of the binary install: resolve the URL and download to a temp file.
     ///
     /// Skips if the binary exists and `force` is false. The returned [`BinaryPlan`] is
@@ -158,7 +204,7 @@ impl Mihoro {
             || store.paths.compat_config_yaml.exists();
         if !force && has_local_config {
             let changed = store.render_candidate(&self.config.mihomo_config)?;
-            let activated = store.activate_candidate()?;
+            let activated = self.activate_candidate_config()?;
             return if changed || activated || seeded {
                 Ok(StageStatus::Installed)
             } else {
@@ -166,22 +212,27 @@ impl Mihoro {
             };
         }
 
+        create_parent_dir(&store.paths.source_yaml)?;
+        let staged_source = NamedTempFile::new_in(&store.paths.root)?;
         download_file(
             client,
             &self.config.remote_config_url,
-            &store.paths.source_yaml,
+            staged_source.path(),
             &self.config.mihoro_user_agent,
         )
         .await?;
-        let source_path = store
-            .paths
-            .source_yaml
+        let staged_source_path = staged_source
+            .path()
             .to_str()
-            .ok_or_else(|| anyhow!("source config path is not valid UTF-8"))?;
-        try_decode_base64_file_inplace(source_path)?;
+            .ok_or_else(|| anyhow!("staged source config path is not valid UTF-8"))?;
+        try_decode_base64_file_inplace(staged_source_path)?;
+        store.install_source_from_stage(staged_source.path())?;
         store.render_candidate(&self.config.mihomo_config)?;
-        store.activate_candidate()?;
-        Ok(StageStatus::Installed)
+        if self.activate_candidate_config()? {
+            Ok(StageStatus::Installed)
+        } else {
+            Ok(StageStatus::Skipped("config already current".to_string()))
+        }
     }
 
     /// Download geodata.  Skips files that already exist (unless `force`).
@@ -405,29 +456,34 @@ impl Mihoro {
         store.seed_source_from_legacy_config()?;
 
         // Download remote mihomo config and apply override
+        create_parent_dir(&store.paths.source_yaml)?;
+        let staged_source = NamedTempFile::new_in(&store.paths.root)?;
         download_file(
             client,
             &self.config.remote_config_url,
-            &store.paths.source_yaml,
+            staged_source.path(),
             &self.config.mihoro_user_agent,
         )
         .await?;
 
         // Try to decode base64 file in place if file is base64 encoding, otherwise do nothing
-        let source_path = store
-            .paths
-            .source_yaml
+        let staged_source_path = staged_source
+            .path()
             .to_str()
-            .ok_or_else(|| anyhow!("source config path is not valid UTF-8"))?;
-        try_decode_base64_file_inplace(source_path)?;
+            .ok_or_else(|| anyhow!("staged source config path is not valid UTF-8"))?;
+        try_decode_base64_file_inplace(staged_source_path)?;
+        store.install_source_from_stage(staged_source.path())?;
 
         store.render_candidate(&self.config.mihomo_config)?;
-        store.activate_candidate()?;
-        println!(
-            "{} Updated and applied config overrides",
-            DETAIL_PREFIX.cyan()
-        );
-        Ok(StageStatus::Installed)
+        if self.activate_candidate_config()? {
+            println!(
+                "{} Updated and applied config overrides",
+                DETAIL_PREFIX.cyan()
+            );
+            Ok(StageStatus::Installed)
+        } else {
+            Ok(StageStatus::Skipped("config already current".to_string()))
+        }
     }
 
     pub async fn update_geodata(&self, client: &Client) -> Result<StageStatus> {
@@ -492,23 +548,49 @@ impl Mihoro {
         Ok(StageStatus::Installed)
     }
 
+    pub async fn restart_service_with_config_rollback(&self) -> Result<StageStatus> {
+        println!("{} Restarting mihomo.service...", DETAIL_PREFIX.cyan());
+        let restart_result = Systemctl::new().restart("mihomo.service").execute();
+        if restart_result.is_ok() && Systemctl::is_active("mihomo.service") {
+            return Ok(StageStatus::Installed);
+        }
+
+        let store = self.config_generation_store();
+        let restored = store.restore_last_good()?;
+        if restored {
+            let _ = Systemctl::new().restart("mihomo.service").execute();
+        }
+
+        match restart_result {
+            Ok(status) => Err(anyhow!(
+                "mihomo.service was not active after restart (status: {}); restored last-good config: {}",
+                status,
+                restored
+            )),
+            Err(err) => Err(anyhow!(
+                "failed to restart mihomo.service: {:#}; restored last-good config: {}",
+                err,
+                restored
+            )),
+        }
+    }
+
     pub async fn apply(&self) -> Result<()> {
         let store = self.config_generation_store();
         store.seed_source_from_legacy_config()?;
         store.render_candidate(&self.config.mihomo_config)?;
-        store.activate_candidate()?;
+        let activated = self.activate_candidate_config()?;
         println!(
             "{} Applied mihomo config overrides",
             self.prefix.green().bold()
         );
 
         // Restart mihomo systemd service
-        Systemctl::new()
-            .restart("mihomo.service")
-            .execute()
-            .map(|_| {
+        if activated {
+            self.restart_service_with_config_rollback().await.map(|_| {
                 println!("{} Restarted mihomo.service", self.prefix.green().bold());
             })?;
+        }
         Ok(())
     }
 
@@ -652,6 +734,16 @@ fn normalize_mihomo_version_token(token: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+fn candidate_validation_args(config_root: &str, candidate_path: &str) -> Vec<String> {
+    vec![
+        "-t".to_string(),
+        "-d".to_string(),
+        config_root.to_string(),
+        "-f".to_string(),
+        candidate_path.to_string(),
+    ]
 }
 
 /// Render the systemd unit file content for mihomo.service.
@@ -813,6 +905,22 @@ mod tests {
         assert_eq!(
             extract_mihomo_version(output),
             Some("alpha-c107c6a".to_string())
+        );
+    }
+
+    #[test]
+    fn test_candidate_validation_args_use_runtime_root_and_candidate() {
+        let args = candidate_validation_args("/tmp/mihomo", "/tmp/mihomo/candidate.yaml");
+
+        assert_eq!(
+            args,
+            vec![
+                "-t".to_string(),
+                "-d".to_string(),
+                "/tmp/mihomo".to_string(),
+                "-f".to_string(),
+                "/tmp/mihomo/candidate.yaml".to_string(),
+            ]
         );
     }
 

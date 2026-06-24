@@ -1,6 +1,6 @@
 use std::process::{Command, ExitStatus};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 
 pub struct Systemctl {
     systemctl: Command,
@@ -54,10 +54,16 @@ impl Systemctl {
     }
 
     pub fn execute(&mut self) -> Result<ExitStatus> {
-        self.systemctl
+        let status = self
+            .systemctl
             .spawn()?
             .wait()
-            .with_context(|| "failed to execute systemctl")
+            .with_context(|| "failed to execute systemctl")?;
+        if status.success() {
+            Ok(status)
+        } else {
+            Err(anyhow!("systemctl exited with {}", status))
+        }
     }
 
     /// Returns `true` if the given user service is currently active.
