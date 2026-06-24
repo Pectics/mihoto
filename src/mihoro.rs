@@ -1,5 +1,6 @@
 use crate::cmd::{CronCommands, ProxyCommands};
-use crate::config::{apply_mihomo_override, parse_config, Config};
+use crate::config::{parse_config, Config};
+use crate::config_store::ConfigGenerationStore;
 use crate::cron;
 use crate::proxy::{proxy_export_cmd, proxy_unset_cmd};
 use crate::resolve_mihomo_bin;
@@ -80,6 +81,10 @@ impl Mihoro {
         }
     }
 
+    fn config_generation_store(&self) -> ConfigGenerationStore {
+        ConfigGenerationStore::new(&self.mihomo_target_config_root)
+    }
+
     /// Stage 1 of the binary install: resolve the URL and download to a temp file.
     ///
     /// Skips if the binary exists and `force` is false. The returned [`BinaryPlan`] is
@@ -146,12 +151,15 @@ impl Mihoro {
     /// Download remote config YAML and apply TOML overrides.
     /// If the config file already exists and `force` is false, only re-applies overrides.
     pub async fn ensure_remote_config(&self, client: &Client, force: bool) -> Result<StageStatus> {
-        let config_path = Path::new(&self.mihomo_target_config_path);
-        if !force && config_path.exists() {
-            // Re-apply TOML overrides onto the cached YAML so user changes take effect.
-            let changed =
-                apply_mihomo_override(&self.mihomo_target_config_path, &self.config.mihomo_config)?;
-            return if changed {
+        let store = self.config_generation_store();
+        let seeded = store.seed_source_from_legacy_config()?;
+        let has_local_config = store.paths.source_yaml.exists()
+            || store.paths.active_yaml.exists()
+            || store.paths.compat_config_yaml.exists();
+        if !force && has_local_config {
+            let changed = store.render_candidate(&self.config.mihomo_config)?;
+            let activated = store.activate_candidate()?;
+            return if changed || activated || seeded {
                 Ok(StageStatus::Installed)
             } else {
                 Ok(StageStatus::Skipped("config already current".to_string()))
@@ -161,12 +169,18 @@ impl Mihoro {
         download_file(
             client,
             &self.config.remote_config_url,
-            config_path,
+            &store.paths.source_yaml,
             &self.config.mihoro_user_agent,
         )
         .await?;
-        try_decode_base64_file_inplace(&self.mihomo_target_config_path)?;
-        apply_mihomo_override(&self.mihomo_target_config_path, &self.config.mihomo_config)?;
+        let source_path = store
+            .paths
+            .source_yaml
+            .to_str()
+            .ok_or_else(|| anyhow!("source config path is not valid UTF-8"))?;
+        try_decode_base64_file_inplace(source_path)?;
+        store.render_candidate(&self.config.mihomo_config)?;
+        store.activate_candidate()?;
         Ok(StageStatus::Installed)
     }
 
@@ -387,19 +401,28 @@ impl Mihoro {
     }
 
     pub async fn update_config(&self, client: &Client) -> Result<StageStatus> {
+        let store = self.config_generation_store();
+        store.seed_source_from_legacy_config()?;
+
         // Download remote mihomo config and apply override
         download_file(
             client,
             &self.config.remote_config_url,
-            Path::new(&self.mihomo_target_config_path),
+            &store.paths.source_yaml,
             &self.config.mihoro_user_agent,
         )
         .await?;
 
         // Try to decode base64 file in place if file is base64 encoding, otherwise do nothing
-        try_decode_base64_file_inplace(&self.mihomo_target_config_path)?;
+        let source_path = store
+            .paths
+            .source_yaml
+            .to_str()
+            .ok_or_else(|| anyhow!("source config path is not valid UTF-8"))?;
+        try_decode_base64_file_inplace(source_path)?;
 
-        apply_mihomo_override(&self.mihomo_target_config_path, &self.config.mihomo_config)?;
+        store.render_candidate(&self.config.mihomo_config)?;
+        store.activate_candidate()?;
         println!(
             "{} Updated and applied config overrides",
             DETAIL_PREFIX.cyan()
@@ -470,15 +493,14 @@ impl Mihoro {
     }
 
     pub async fn apply(&self) -> Result<()> {
-        // Apply mihomo config override
-        apply_mihomo_override(&self.mihomo_target_config_path, &self.config.mihomo_config).map(
-            |_| {
-                println!(
-                    "{} Applied mihomo config overrides",
-                    self.prefix.green().bold()
-                );
-            },
-        )?;
+        let store = self.config_generation_store();
+        store.seed_source_from_legacy_config()?;
+        store.render_candidate(&self.config.mihomo_config)?;
+        store.activate_candidate()?;
+        println!(
+            "{} Applied mihomo config overrides",
+            self.prefix.green().bold()
+        );
 
         // Restart mihomo systemd service
         Systemctl::new()
@@ -659,6 +681,7 @@ WantedBy=default.target",
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::apply_mihomo_override;
     use std::fs;
     use tempfile::tempdir;
 
@@ -843,7 +866,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ensure_remote_config_skips_when_cached_config_is_current() -> Result<()> {
+    async fn test_ensure_remote_config_seeds_generations_then_skips_when_current() -> Result<()> {
         let dir = tempdir()?;
         let config_path = dir.path().join("test.toml");
         let yaml_path = dir.path().join("config.yaml");
@@ -882,11 +905,28 @@ mod tests {
         let status = mihoro.ensure_remote_config(&Client::new(), false).await?;
 
         match status {
+            StageStatus::Installed => {}
+            StageStatus::Skipped(reason) => panic!("expected generation seed, got skip: {reason}"),
+            StageStatus::Failed(_) => panic!("ensure_remote_config returned a failed status"),
+        }
+        assert_eq!(fs::read_to_string(&yaml_path)?, current_content);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("source.yaml"))?,
+            current_content
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("active.yaml"))?,
+            current_content
+        );
+        assert!(fs::read_to_string(dir.path().join("candidate.yaml"))?.contains("port: 9999"));
+        assert!(fs::read_to_string(dir.path().join("overlay.yaml"))?.contains("port: 9999"));
+
+        let status = mihoro.ensure_remote_config(&Client::new(), false).await?;
+        match status {
             StageStatus::Skipped(reason) => assert_eq!(reason, "config already current"),
             StageStatus::Installed => panic!("expected remote config to be skipped"),
             StageStatus::Failed(_) => panic!("ensure_remote_config returned a failed status"),
         }
-        assert_eq!(fs::read_to_string(&yaml_path)?, current_content);
 
         Ok(())
     }

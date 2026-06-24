@@ -109,6 +109,8 @@ mmdb = "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/count
 
 By default, `ui = "metacubexd"` enables dashboard management, so `mihoro init` also downloads the web UI assets and serves them from the configured `external_controller`. When the controller binds all interfaces, `mihoro init` prints localhost plus detected non-loopback machine IPs such as LAN or Tailscale/ZeroTier addresses.
 
+Mihoro keeps generated Mihomo config state under `mihomo_config_root`. The runtime-compatible `config.yaml` remains the file consumed by `mihomo -d <root>`, while `source.yaml`, `overlay.yaml`, `candidate.yaml`, `active.yaml`, and `last-good.yaml` preserve the raw subscription config, local override projection, render candidate, current active config, and previous active config for safer future activation flows.
+
 `init` is idempotent — re-running it skips any artifacts that are already in place. Use `--force` to re-download everything:
 
 ```bash
