@@ -310,6 +310,7 @@ pub async fn run(config_path: &str, client: &Client, opts: InitOptions) -> Resul
     let force = opts.force;
     let arch = opts.arch.as_deref();
     let mut report = StageReport::new();
+    let had_binary_before_init = mihoro.mihomo_binary_exists();
 
     // --- download phase -------------------------------------------------------
     //
@@ -319,7 +320,7 @@ pub async fn run(config_path: &str, client: &Client, opts: InitOptions) -> Resul
     // swap is deferred to the "install binary" stage after all downloads finish.
 
     report.begin("mihomo binary", Some("downloading mihomo binary"));
-    let binary_temp = match mihoro.prepare_binary(client, force, arch).await {
+    let mut binary_temp = match mihoro.prepare_binary(client, force, arch).await {
         Ok(BinaryPlan::Install(temp)) => {
             report.record("mihomo binary", StageStatus::Installed);
             Some(temp)
@@ -332,6 +333,27 @@ pub async fn run(config_path: &str, client: &Client, opts: InitOptions) -> Resul
             report.record("mihomo binary", StageStatus::Failed(e));
             None
         }
+    };
+
+    let installed_binary_before_config = if !had_binary_before_init {
+        match binary_temp.take() {
+            None => false,
+            Some(temp) => {
+                report.begin(
+                    "install binary",
+                    Some("installing mihomo binary for config validation"),
+                );
+                let status = match mihoro.install_binary(temp).await {
+                    Ok(s) => s,
+                    Err(e) => StageStatus::Failed(e),
+                };
+                let installed = matches!(status, StageStatus::Installed);
+                report.record("install binary", status);
+                installed
+            }
+        }
+    } else {
+        false
     };
 
     report
@@ -365,19 +387,23 @@ pub async fn run(config_path: &str, client: &Client, opts: InitOptions) -> Resul
 
     if report.stage_failed("remote config") {
         let skip = || StageStatus::Skipped("skipped: remote config stage failed".to_string());
-        report.record("install binary", skip());
+        if !installed_binary_before_config {
+            report.record("install binary", skip());
+        }
         report.record("systemd service", skip());
         report.record("service start", skip());
     } else {
-        report.begin("install binary", Some("installing mihomo binary"));
-        let install_status = match binary_temp {
-            None => StageStatus::Skipped("nothing to install".to_string()),
-            Some(temp) => match mihoro.install_binary(temp).await {
-                Ok(s) => s,
-                Err(e) => StageStatus::Failed(e),
-            },
-        };
-        report.record("install binary", install_status);
+        if !installed_binary_before_config {
+            report.begin("install binary", Some("installing mihomo binary"));
+            let install_status = match binary_temp {
+                None => StageStatus::Skipped("nothing to install".to_string()),
+                Some(temp) => match mihoro.install_binary(temp).await {
+                    Ok(s) => s,
+                    Err(e) => StageStatus::Failed(e),
+                },
+            };
+            report.record("install binary", install_status);
+        }
 
         report
             .run(

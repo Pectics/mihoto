@@ -2,7 +2,9 @@ use crate::config::{render_mihomo_overlay, render_mihomo_override, MihomoConfig}
 use crate::utils::create_parent_dir;
 use anyhow::{Context, Result};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use tempfile::NamedTempFile;
 
 #[allow(dead_code)]
 pub const DEFAULT_SYSTEM_CONFIG_ROOT: &str = "/etc/mihomo";
@@ -97,6 +99,17 @@ impl ConfigGenerationStore {
         Ok(overlay_changed || candidate_changed)
     }
 
+    pub fn install_source_from_stage(&self, staged_path: &Path) -> Result<()> {
+        create_parent_dir(&self.paths.source_yaml)?;
+        fs::rename(staged_path, &self.paths.source_yaml).with_context(|| {
+            format!(
+                "failed to replace `{}` with staged source `{}`",
+                self.paths.source_yaml.display(),
+                staged_path.display()
+            )
+        })
+    }
+
     pub fn activate_candidate(&self) -> Result<bool> {
         let candidate = fs::read(&self.paths.candidate_yaml).with_context(|| {
             format!(
@@ -116,14 +129,54 @@ impl ConfigGenerationStore {
         if let Some(active) = active {
             if active != candidate {
                 create_parent_dir(&self.paths.last_good_yaml)?;
-                fs::write(&self.paths.last_good_yaml, active)?;
+                atomic_write(&self.paths.last_good_yaml, &active)?;
             }
         }
 
         create_parent_dir(&self.paths.active_yaml)?;
-        fs::write(&self.paths.active_yaml, &candidate)?;
+        atomic_write(&self.paths.active_yaml, &candidate)?;
         create_parent_dir(&self.paths.compat_config_yaml)?;
-        fs::write(&self.paths.compat_config_yaml, &candidate)?;
+        atomic_write(&self.paths.compat_config_yaml, &candidate)?;
+        Ok(true)
+    }
+
+    pub fn candidate_matches_active_and_compat(&self) -> Result<bool> {
+        let candidate = match fs::read(&self.paths.candidate_yaml) {
+            Ok(candidate) => candidate,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "failed to read candidate config `{}`",
+                        self.paths.candidate_yaml.display()
+                    )
+                })
+            }
+        };
+        let active = fs::read(&self.paths.active_yaml).ok();
+        let compat = fs::read(&self.paths.compat_config_yaml).ok();
+        Ok(active.as_deref() == Some(candidate.as_slice())
+            && compat.as_deref() == Some(candidate.as_slice()))
+    }
+
+    pub fn restore_last_good(&self) -> Result<bool> {
+        let last_good = match fs::read(&self.paths.last_good_yaml) {
+            Ok(last_good) => last_good,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "failed to read last-good config `{}`",
+                        self.paths.last_good_yaml.display()
+                    )
+                })
+            }
+        };
+
+        create_parent_dir(&self.paths.active_yaml)?;
+        atomic_write(&self.paths.active_yaml, &last_good)?;
+        create_parent_dir(&self.paths.compat_config_yaml)?;
+        atomic_write(&self.paths.compat_config_yaml, &last_good)?;
         Ok(true)
     }
 
@@ -142,6 +195,20 @@ impl ConfigGenerationStore {
             self.paths.root.display()
         )
     }
+}
+
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    create_parent_dir(path)?;
+    let parent = path
+        .parent()
+        .with_context(|| format!("parent directory of `{}` invalid", path.display()))?;
+    let mut temp = NamedTempFile::new_in(parent)?;
+    temp.write_all(bytes)?;
+    temp.as_file().sync_all()?;
+    temp.persist(path)
+        .map(|_| ())
+        .map_err(|err| err.error)
+        .with_context(|| format!("failed to atomically write `{}`", path.display()))
 }
 
 #[cfg(test)]
@@ -284,6 +351,46 @@ proxies:
             fs::read_to_string(&store.paths.active_yaml)?,
             fs::read_to_string(&store.paths.compat_config_yaml)?
         );
+        Ok(())
+    }
+
+    #[test]
+    fn restore_last_good_reverts_active_and_compat_config() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let store = ConfigGenerationStore::new(dir.path());
+        fs::write(&store.paths.last_good_yaml, "port: 1111\n")?;
+        fs::write(&store.paths.active_yaml, "port: 2222\n")?;
+        fs::write(&store.paths.compat_config_yaml, "port: 2222\n")?;
+
+        let restored = store.restore_last_good()?;
+
+        assert!(restored);
+        assert_eq!(
+            fs::read_to_string(&store.paths.active_yaml)?,
+            "port: 1111\n"
+        );
+        assert_eq!(
+            fs::read_to_string(&store.paths.compat_config_yaml)?,
+            "port: 1111\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn install_source_from_stage_replaces_source_atomically() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let store = ConfigGenerationStore::new(dir.path());
+        let staged = dir.path().join(".source-download.tmp");
+        fs::write(&store.paths.source_yaml, "port: 1111\n")?;
+        fs::write(&staged, "port: 2222\n")?;
+
+        store.install_source_from_stage(&staged)?;
+
+        assert_eq!(
+            fs::read_to_string(&store.paths.source_yaml)?,
+            "port: 2222\n"
+        );
+        assert!(!staged.exists());
         Ok(())
     }
 }

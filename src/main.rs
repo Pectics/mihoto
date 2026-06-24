@@ -175,16 +175,25 @@ async fn cli() -> Result<()> {
                         mihoro.update_core(&client, arch.as_deref())
                     })
                     .await;
-                if !report.has_failures() {
+                if !report.has_failures()
+                    && (report.has_installed("config") || report.has_installed("core"))
+                {
                     report
                         .run("service restart", Some("restarting mihomo.service"), || {
-                            mihoro.restart_service()
+                            mihoro.restart_service_with_config_rollback()
                         })
                         .await;
                 } else {
                     report.record(
                         "service restart",
-                        StageStatus::Skipped("skipped due to earlier failures".to_string()),
+                        StageStatus::Skipped(
+                            if report.has_failures() {
+                                "skipped due to earlier failures"
+                            } else {
+                                "nothing changed that requires restart"
+                            }
+                            .to_string(),
+                        ),
                     );
                 }
             } else if *core {
@@ -228,16 +237,23 @@ async fn cli() -> Result<()> {
                         mihoro.update_config(&client)
                     })
                     .await;
-                if !report.has_failures() {
+                if !report.has_failures() && report.has_installed("config") {
                     report
                         .run("service restart", Some("restarting mihomo.service"), || {
-                            mihoro.restart_service()
+                            mihoro.restart_service_with_config_rollback()
                         })
                         .await;
                 } else {
                     report.record(
                         "service restart",
-                        StageStatus::Skipped("skipped due to earlier failures".to_string()),
+                        StageStatus::Skipped(
+                            if report.has_failures() {
+                                "skipped due to earlier failures"
+                            } else {
+                                "config already current"
+                            }
+                            .to_string(),
+                        ),
                     );
                 }
             }
