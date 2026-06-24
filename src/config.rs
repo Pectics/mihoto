@@ -6,6 +6,7 @@ use std::{collections::HashMap, env, fs, net::IpAddr, path::Path};
 use anyhow::{bail, Result};
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
+use serde_yaml::{Mapping, Value};
 
 pub const ALLOW_INSECURE_CONTROLLER_ENV: &str = "MIHORO_ALLOW_INSECURE_CONTROLLER";
 
@@ -24,6 +25,12 @@ pub enum MihomoChannel {
 #[serde(default)]
 pub struct Config {
     pub remote_config_url: String,
+    pub active_profile: String,
+    pub profile_config_root: String,
+    pub profile_data_root: String,
+    pub profile_state_root: String,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub profiles: HashMap<String, ProfileConfig>,
     #[serde(default = "default_ui", skip_serializing_if = "Option::is_none")]
     pub ui: Option<Ui>,
     pub mihomo_channel: MihomoChannel,
@@ -48,6 +55,11 @@ impl Default for Config {
             mihomo_channel: MihomoChannel::default(),
             mihomo_arch: None,
             remote_config_url: String::from(""),
+            active_profile: String::from("default"),
+            profile_config_root: String::from("~/.config/mihoto"),
+            profile_data_root: String::from("~/.local/share/mihoto"),
+            profile_state_root: String::from("~/.local/state/mihoto"),
+            profiles: HashMap::new(),
             mihomo_binary_path: String::from("~/.local/bin/mihomo"),
             mihomo_config_root: String::from("~/.config/mihomo"),
             user_systemd_root: String::from("~/.config/systemd/user"),
@@ -56,6 +68,21 @@ impl Default for Config {
             mihomo_config: MihomoConfig::default(),
         }
     }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum ProfileSource {
+    Url { url: String },
+    File { path: String },
+    Existing { path: String },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ProfileConfig {
+    pub source: ProfileSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
 }
 
 /// `mihomo` configurations (partial).
@@ -163,6 +190,21 @@ impl Config {
         write_private_file(path, serialized_config.as_bytes())?;
         Ok(())
     }
+
+    pub fn effective_profile(&self, name: &str) -> Option<ProfileConfig> {
+        if let Some(profile) = self.profiles.get(name) {
+            return Some(profile.clone());
+        }
+        if self.profiles.is_empty() && name == "default" && !self.remote_config_url.is_empty() {
+            return Some(ProfileConfig {
+                source: ProfileSource::Url {
+                    url: self.remote_config_url.clone(),
+                },
+                user_agent: None,
+            });
+        }
+        None
+    }
 }
 
 /// Load config from path without validation.  Returns `Ok(None)` if the file does not exist.
@@ -187,15 +229,23 @@ pub fn write_default_if_missing(path: &str) -> Result<bool> {
 /// Validate that required config fields are non-empty.
 pub fn validate_config(config: &Config) -> Result<()> {
     let required_fields = [
-        ("remote_config_url", &config.remote_config_url),
         ("mihomo_binary_path", &config.mihomo_binary_path),
         ("mihomo_config_root", &config.mihomo_config_root),
         ("user_systemd_root", &config.user_systemd_root),
+        ("profile_config_root", &config.profile_config_root),
+        ("profile_data_root", &config.profile_data_root),
+        ("profile_state_root", &config.profile_state_root),
     ];
     for (field, value) in required_fields.iter() {
         if value.is_empty() {
             bail!("`{}` undefined", field);
         }
+    }
+    if config.effective_profile(&config.active_profile).is_none() {
+        bail!(
+            "`remote_config_url` undefined and active profile `{}` not found",
+            config.active_profile
+        );
     }
     validate_controller_security(config)?;
     Ok(())
@@ -386,25 +436,28 @@ pub fn render_mihomo_override(
     override_config: &MihomoConfig,
 ) -> Result<bool> {
     let raw_mihomo_yaml = fs::read_to_string(source_path)?;
-    let mut mihomo_yaml: MihomoYamlConfig = serde_yaml::from_str(&raw_mihomo_yaml)?;
-
-    // Apply config overrides
-    mihomo_yaml.port = Some(override_config.port);
-    mihomo_yaml.socks_port = Some(override_config.socks_port);
-    mihomo_yaml.mixed_port = override_config.mixed_port;
-    mihomo_yaml.redir_port = override_config.redir_port;
-    mihomo_yaml.allow_lan = override_config.allow_lan;
-    mihomo_yaml.bind_address = override_config.bind_address.clone();
-    mihomo_yaml.mode = Some(override_config.mode.clone());
-    mihomo_yaml.log_level = Some(override_config.log_level.clone());
-    mihomo_yaml.ipv6 = override_config.ipv6;
-    mihomo_yaml.external_controller = override_config.external_controller.clone();
-    mihomo_yaml.external_ui = override_config.external_ui.clone();
-    mihomo_yaml.secret = override_config.secret.clone();
-    mihomo_yaml.geodata_mode = override_config.geodata_mode;
-    mihomo_yaml.geo_auto_update = override_config.geo_auto_update;
-    mihomo_yaml.geo_update_interval = override_config.geo_update_interval;
-    mihomo_yaml.geox_url = override_config.geox_url.clone();
+    let source_value: Value = serde_yaml::from_str(&raw_mihomo_yaml)?;
+    let overlay = MihomoYamlConfig {
+        port: Some(override_config.port),
+        socks_port: Some(override_config.socks_port),
+        mixed_port: override_config.mixed_port,
+        redir_port: override_config.redir_port,
+        allow_lan: override_config.allow_lan,
+        bind_address: override_config.bind_address.clone(),
+        mode: Some(override_config.mode.clone()),
+        log_level: Some(override_config.log_level.clone()),
+        ipv6: override_config.ipv6,
+        external_controller: override_config.external_controller.clone(),
+        external_ui: override_config.external_ui.clone(),
+        secret: override_config.secret.clone(),
+        geodata_mode: override_config.geodata_mode,
+        geo_auto_update: override_config.geo_auto_update,
+        geo_update_interval: override_config.geo_update_interval,
+        geox_url: override_config.geox_url.clone(),
+        extra: HashMap::new(),
+    };
+    let overlay_value = serde_yaml::to_value(overlay)?;
+    let mihomo_yaml = apply_yaml_overlay(source_value, overlay_value)?;
 
     // Avoid rewriting already-current YAML just because formatting or map order changed.
     let serialized_mihomo_yaml = serde_yaml::to_string(&mihomo_yaml)?;
@@ -418,6 +471,49 @@ pub fn render_mihomo_override(
 
     write_private_file(output_path, serialized_mihomo_yaml.as_bytes())?;
     Ok(true)
+}
+
+pub fn apply_yaml_overlay(source: Value, overlay: Value) -> Result<Value> {
+    if is_delete_value(&overlay) {
+        bail!("`!delete` cannot be used as the root overlay value");
+    }
+    Ok(merge_yaml_value(source, overlay))
+}
+
+fn merge_yaml_value(source: Value, overlay: Value) -> Value {
+    match (source, overlay) {
+        (Value::Mapping(mut source), Value::Mapping(overlay)) => {
+            merge_yaml_mapping(&mut source, overlay);
+            Value::Mapping(source)
+        }
+        (_, overlay) => overlay,
+    }
+}
+
+fn merge_yaml_mapping(source: &mut Mapping, overlay: Mapping) {
+    for (key, value) in overlay {
+        if is_delete_value(&value) {
+            source.remove(&key);
+            continue;
+        }
+        match (source.remove(&key), value) {
+            (Some(Value::Mapping(existing)), Value::Mapping(overlay_mapping)) => {
+                let mut existing = existing;
+                merge_yaml_mapping(&mut existing, overlay_mapping);
+                source.insert(key, Value::Mapping(existing));
+            }
+            (_, replacement) => {
+                source.insert(key, replacement);
+            }
+        }
+    }
+}
+
+fn is_delete_value(value: &Value) -> bool {
+    match value {
+        Value::Tagged(tagged) => tagged.tag == "!delete",
+        _ => false,
+    }
 }
 
 #[allow(dead_code)]
@@ -602,5 +698,60 @@ mod tests {
         assert_eq!(config.ui, Some(Ui::Metacubexd));
 
         Ok(())
+    }
+
+    #[test]
+    fn overlay_merges_maps_replaces_arrays_and_deletes_keys() -> Result<()> {
+        let source: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+port: 7890
+profile:
+  name: remote
+  tags:
+    - remote
+rules:
+  - MATCH,DIRECT
+secret: keep-me
+"#,
+        )?;
+        let overlay: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+profile:
+  mode: local
+  tags:
+    - local
+rules:
+  - DOMAIN,example.com,DIRECT
+secret: !delete
+"#,
+        )?;
+
+        let rendered = apply_yaml_overlay(source, overlay)?;
+        let rendered = serde_yaml::to_string(&rendered)?;
+
+        assert!(rendered.contains("port: 7890"));
+        assert!(rendered.contains("name: remote"));
+        assert!(rendered.contains("mode: local"));
+        assert!(rendered.contains("- local"));
+        assert!(!rendered.contains("- remote"));
+        assert!(rendered.contains("DOMAIN,example.com,DIRECT"));
+        assert!(!rendered.contains("secret:"));
+        Ok(())
+    }
+
+    #[test]
+    fn config_synthesizes_default_profile_from_legacy_remote_url() {
+        let mut config = Config::new();
+        config.remote_config_url = "https://example.com/sub.yaml".to_string();
+
+        let profile = config.effective_profile("default").unwrap();
+
+        assert_eq!(config.active_profile, "default");
+        assert_eq!(
+            profile.source,
+            ProfileSource::Url {
+                url: "https://example.com/sub.yaml".to_string()
+            }
+        );
     }
 }

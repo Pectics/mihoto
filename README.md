@@ -78,6 +78,10 @@ The generated config uses sensible defaults, including `metacubexd` as the manag
 
 ```toml
 remote_config_url = "https://example.com/subscription"
+active_profile = "default"
+profile_config_root = "~/.config/mihoto"
+profile_data_root = "~/.local/share/mihoto"
+profile_state_root = "~/.local/state/mihoto"
 ui = "metacubexd"
 mihomo_channel = "stable"
 mihomo_binary_path = "~/.local/bin/mihomo"
@@ -85,6 +89,10 @@ mihomo_config_root = "~/.config/mihomo"
 user_systemd_root = "~/.config/systemd/user"
 mihoro_user_agent = "mihoro"
 auto_update_interval = 12
+
+[profiles.default]
+source = { type = "url", url = "https://example.com/subscription" }
+user_agent = "mihoro/0.2.0 (Clash-compatible)"
 
 [mihomo_config]
 port = 7891
@@ -109,7 +117,34 @@ mmdb = "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/count
 
 By default, `ui = "metacubexd"` enables dashboard management, so `mihoro init` also downloads the web UI assets and serves them from the configured `external_controller`. The generated controller binds to `127.0.0.1:9090`; if you bind it to a non-loopback address, set `mihomo_config.secret` or explicitly export `MIHORO_ALLOW_INSECURE_CONTROLLER=1`. When the controller binds all interfaces, `mihoro init` prints localhost plus detected non-loopback machine IPs such as LAN or Tailscale/ZeroTier addresses.
 
-Mihoro keeps generated Mihomo config state under `mihomo_config_root`. The runtime-compatible `config.yaml` remains the file consumed by `mihomo -d <root>`, while `source.yaml`, `overlay.yaml`, `candidate.yaml`, `active.yaml`, and `last-good.yaml` preserve the raw subscription config, local override projection, render candidate, current active config, and previous active config for transactional activation and rollback.
+Mihoro keeps profile render state under `profile_state_root/profiles/<name>`. Each profile has `source.yaml`, `overlay.yaml`, `candidate.yaml`, `active.yaml`, and `last-good.yaml` for the normalized source config, local override projection, render candidate, current active config, and previous active config. The runtime-compatible `mihomo_config_root/config.yaml` remains the file consumed by `mihomo -d <root>`.
+
+Older configs with only `remote_config_url` continue to work: if no `[profiles]` table exists, Mihoro synthesizes a legacy `default` URL profile. New profile writes prefer `[profiles.<name>]`.
+
+Profiles support URL, local-file, and existing-config sources:
+
+```bash
+mihoro profile add work --url https://example.com/subscription
+mihoro profile add local --file ~/Downloads/config.yaml
+mihoro profile add imported --existing ~/.config/mihomo/config.yaml
+mihoro profile list
+mihoro profile show work
+mihoro profile use work
+```
+
+Authenticated subscription headers are stored outside `mihoro.toml` in private per-profile metadata under `profile_data_root` with `0600` file permissions:
+
+```bash
+mihoro profile add work --url https://example.com/subscription \
+  --user-agent "mihoro/0.2.0 (Clash-compatible)" \
+  --header "Authorization=Bearer <token>"
+```
+
+Profile headers are sent only when fetching that profile's URL source. They are not used for Mihomo core, geodata, or dashboard downloads. URLs with credentials or token-like query parameters, `Authorization`, `Cookie`, `secret`, and stored header values are redacted from errors and diff output.
+
+Source responses are classified before YAML parsing. Empty responses, HTML login pages, V2Ray JSON, invalid YAML, and responses over 16 MiB fail before active/runtime config is touched. Base64-encoded Mihomo YAML is decoded and normalized into the profile's `source.yaml`.
+
+Local overrides are rendered as a generic YAML overlay over the normalized source. Missing keys inherit from the source, mappings merge recursively, scalars replace values, arrays replace wholesale, and `!delete` removes mapping keys. Unknown source fields are preserved.
 
 `init` is idempotent — re-running it skips any artifacts that are already in place. Use `--force` to re-download everything:
 
@@ -154,13 +189,18 @@ To update subscribed remote config:
 ```bash
 mihoro update
 # or explicitly: mihoro update --config
+mihoro update --profile work
 ```
 
 To apply settings changes after modifying `mihoro.toml`:
 
 ```bash
 mihoro apply
+mihoro apply --profile work
+mihoro apply --dry-run --diff
 ```
+
+`mihoro apply --dry-run` renders and validates the candidate config without changing the profile active state, `last-good.yaml`, runtime `config.yaml`, or restarting `mihomo.service`. Add `--diff` to print a redacted semantic diff between the active and candidate configs.
 
 To update `mihomo` binary (core) and/or geodata:
 

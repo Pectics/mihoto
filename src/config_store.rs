@@ -1,5 +1,7 @@
 use crate::config::{render_mihomo_overlay, render_mihomo_override, MihomoConfig};
-use crate::utils::{create_parent_dir, create_private_parent_dir, set_private_file_permissions};
+use crate::utils::{
+    create_parent_dir, create_private_parent_dir, redact_sensitive, set_private_file_permissions,
+};
 use anyhow::{Context, Result};
 use std::fs;
 use std::io::Write;
@@ -21,8 +23,15 @@ pub struct ConfigGenerationPaths {
 }
 
 impl ConfigGenerationPaths {
+    #[allow(dead_code)]
     pub fn for_user_root(root: impl AsRef<Path>) -> Self {
         Self::from_root(root.as_ref())
+    }
+
+    pub fn for_profile_root(root: impl AsRef<Path>, compat_config_yaml: impl AsRef<Path>) -> Self {
+        let mut paths = Self::from_root(root.as_ref());
+        paths.compat_config_yaml = compat_config_yaml.as_ref().to_path_buf();
+        paths
     }
 
     #[allow(dead_code)]
@@ -49,9 +58,16 @@ pub struct ConfigGenerationStore {
 }
 
 impl ConfigGenerationStore {
+    #[allow(dead_code)]
     pub fn new(root: impl AsRef<Path>) -> Self {
         Self {
             paths: ConfigGenerationPaths::for_user_root(root),
+        }
+    }
+
+    pub fn new_for_profile(root: impl AsRef<Path>, compat_config_yaml: impl AsRef<Path>) -> Self {
+        Self {
+            paths: ConfigGenerationPaths::for_profile_root(root, compat_config_yaml),
         }
     }
 
@@ -153,8 +169,8 @@ impl ConfigGenerationStore {
         };
         let active = fs::read(&self.paths.active_yaml).ok();
         let compat = fs::read(&self.paths.compat_config_yaml).ok();
-        Ok(active.as_deref() == Some(candidate.as_slice())
-            && compat.as_deref() == Some(candidate.as_slice()))
+        Ok(contents_match(active.as_deref(), &candidate)?
+            && contents_match(compat.as_deref(), &candidate)?)
     }
 
     pub fn restore_last_good(&self) -> Result<bool> {
@@ -176,6 +192,12 @@ impl ConfigGenerationStore {
         Ok(true)
     }
 
+    pub fn render_redacted_diff(&self) -> Result<String> {
+        let active = read_yaml_value_if_exists(&self.paths.active_yaml)?;
+        let candidate = read_yaml_value_if_exists(&self.paths.candidate_yaml)?;
+        Ok(render_value_diff("$", active.as_ref(), candidate.as_ref()))
+    }
+
     fn source_path_for_render(&self) -> Result<PathBuf> {
         if self.paths.source_yaml.exists() {
             return Ok(self.paths.source_yaml.clone());
@@ -191,6 +213,80 @@ impl ConfigGenerationStore {
             self.paths.root.display()
         )
     }
+}
+
+fn contents_match(existing: Option<&[u8]>, candidate: &[u8]) -> Result<bool> {
+    let Some(existing) = existing else {
+        return Ok(false);
+    };
+    if existing == candidate {
+        return Ok(true);
+    }
+    let existing_value: serde_yaml::Value = serde_yaml::from_slice(existing)?;
+    let candidate_value: serde_yaml::Value = serde_yaml::from_slice(candidate)?;
+    Ok(existing_value == candidate_value)
+}
+
+fn read_yaml_value_if_exists(path: &Path) -> Result<Option<serde_yaml::Value>> {
+    match fs::read_to_string(path) {
+        Ok(raw) => Ok(Some(serde_yaml::from_str(&raw)?)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).with_context(|| format!("failed to read `{}`", path.display())),
+    }
+}
+
+fn render_value_diff(
+    path: &str,
+    old: Option<&serde_yaml::Value>,
+    new: Option<&serde_yaml::Value>,
+) -> String {
+    if old == new {
+        return String::new();
+    }
+    match (old, new) {
+        (Some(serde_yaml::Value::Mapping(old)), Some(serde_yaml::Value::Mapping(new))) => {
+            let mut keys = old.keys().chain(new.keys()).collect::<Vec<_>>();
+            keys.sort_by_key(|key| serde_yaml::to_string(key).unwrap_or_default());
+            keys.dedup();
+            keys.into_iter()
+                .map(|key| {
+                    let label = yaml_key_label(key);
+                    let child_path = if path == "$" {
+                        format!("$.{label}")
+                    } else {
+                        format!("{path}.{label}")
+                    };
+                    render_value_diff(&child_path, old.get(key), new.get(key))
+                })
+                .collect()
+        }
+        (None, Some(value)) => {
+            format!("+ {path}: {}\n", redact_sensitive(&yaml_inline(value)))
+        }
+        (Some(value), None) => {
+            format!("- {path}: {}\n", redact_sensitive(&yaml_inline(value)))
+        }
+        (Some(old), Some(new)) => format!(
+            "~ {path}: {} -> {}\n",
+            redact_sensitive(&yaml_inline(old)),
+            redact_sensitive(&yaml_inline(new))
+        ),
+        (None, None) => String::new(),
+    }
+}
+
+fn yaml_key_label(key: &serde_yaml::Value) -> String {
+    match key {
+        serde_yaml::Value::String(value) => value.clone(),
+        _ => yaml_inline(key),
+    }
+}
+
+fn yaml_inline(value: &serde_yaml::Value) -> String {
+    serde_yaml::to_string(value)
+        .unwrap_or_else(|_| "<unprintable>".to_string())
+        .trim()
+        .replace('\n', " ")
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {

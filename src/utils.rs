@@ -92,11 +92,30 @@ pub fn redact_sensitive(input: &str) -> String {
             }
         }
     }
-    redact_label_value(&redacted, "secret:")
+    let redacted = redact_label_value(&redacted, "secret:");
+    let redacted = redact_authorization_value(&redacted);
+    redact_label_value(&redacted, "Cookie:")
+}
+
+pub fn redact_sensitive_values(
+    input: &str,
+    values: impl IntoIterator<Item = impl AsRef<str>>,
+) -> String {
+    let mut redacted = redact_sensitive(input);
+    for value in values {
+        let value = value.as_ref();
+        if !value.trim().is_empty() {
+            redacted = redacted.replace(value, "***");
+        }
+    }
+    redacted
 }
 
 fn redact_url_token(token: &str) -> Result<String, ()> {
     let trimmed = token.trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | ')' | '('));
+    if !trimmed.contains("://") {
+        return Err(());
+    }
     let mut url = reqwest::Url::parse(trimmed).map_err(|_| ())?;
     if !url.username().is_empty() || url.password().is_some() {
         let _ = url.set_username("***");
@@ -137,7 +156,11 @@ fn is_sensitive_key(key: &str) -> bool {
 fn redact_label_value(input: &str, label: &str) -> String {
     let mut output = input.to_string();
     let mut search_from = 0usize;
-    while let Some(relative_idx) = output[search_from..].find(label) {
+    let label_lower = label.to_ascii_lowercase();
+    while let Some(relative_idx) = output[search_from..]
+        .to_ascii_lowercase()
+        .find(&label_lower)
+    {
         let label_start = search_from + relative_idx;
         let value_start = label_start + label.len();
         let spaces = output[value_start..]
@@ -157,6 +180,44 @@ fn redact_label_value(input: &str, label: &str) -> String {
         }
         let value_end = value_start + value_len;
         output.replace_range(value_start..value_end, "***");
+        search_from = value_start + 3;
+    }
+    output
+}
+
+fn redact_authorization_value(input: &str) -> String {
+    let label = "Authorization:";
+    let mut output = input.to_string();
+    let mut search_from = 0usize;
+    let label_lower = label.to_ascii_lowercase();
+    while let Some(relative_idx) = output[search_from..]
+        .to_ascii_lowercase()
+        .find(&label_lower)
+    {
+        let label_start = search_from + relative_idx;
+        let value_start = label_start + label.len();
+        let spaces = output[value_start..]
+            .chars()
+            .take_while(|c| c.is_whitespace())
+            .map(char::len_utf8)
+            .sum::<usize>();
+        let value_start = value_start + spaces;
+        let mut tokens = output[value_start..]
+            .split_whitespace()
+            .take(2)
+            .collect::<Vec<_>>();
+        if tokens.is_empty() {
+            search_from = value_start;
+            continue;
+        }
+        if !matches!(
+            tokens[0].to_ascii_lowercase().as_str(),
+            "bearer" | "basic" | "digest"
+        ) {
+            tokens.truncate(1);
+        }
+        let value_len = tokens.join(" ").len();
+        output.replace_range(value_start..value_start + value_len, "***");
         search_from = value_start + 3;
     }
     output
@@ -372,6 +433,7 @@ pub fn extract_gzip(from_path: &Path, to_path: &str, prefix: impl std::fmt::Disp
 /// # Arguments
 ///
 /// * `filepath` - Path to the file to decode base64 content in place.
+#[allow(dead_code)]
 pub fn try_decode_base64_file_inplace(filepath: &str) -> Result<()> {
     // Open the file for reading and writing
     let mut file = File::options().read(true).write(true).open(filepath)?;
@@ -452,14 +514,31 @@ mod tests {
     #[test]
     fn test_redact_sensitive_hides_credentials_and_tokens() {
         let redacted = redact_sensitive(
-            "GET https://user:pass@example.com/sub?token=abc&foo=bar secret: hunter2",
+            "GET https://user:pass@example.com/sub?token=abc&foo=bar secret: hunter2 \
+Authorization: Bearer abc Cookie: session=secret",
         );
 
         assert!(!redacted.contains("user:pass"));
         assert!(!redacted.contains("token=abc"));
         assert!(!redacted.contains("hunter2"));
+        assert!(!redacted.contains("Bearer abc"));
+        assert!(!redacted.contains("session=secret"));
         assert!(redacted.contains("https://***@example.com/sub?token=***&foo=bar"));
         assert!(redacted.contains("secret: ***"));
+        assert!(redacted.contains("Authorization: ***"));
+        assert!(redacted.contains("Cookie: ***"));
+    }
+
+    #[test]
+    fn test_redact_sensitive_values_hides_configured_values() {
+        let redacted = redact_sensitive_values(
+            "custom-header: top-secret-value\nnormal: visible\n",
+            ["top-secret-value"],
+        );
+
+        assert!(!redacted.contains("top-secret-value"));
+        assert!(redacted.contains("custom-header: ***"));
+        assert!(redacted.contains("normal: visible"));
     }
 
     #[test]

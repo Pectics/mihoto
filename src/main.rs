@@ -6,6 +6,7 @@ mod init;
 mod mihoro;
 mod proxy;
 mod resolve_mihomo_bin;
+mod source;
 mod systemctl;
 mod ui;
 #[cfg(feature = "self_update")]
@@ -144,6 +145,7 @@ async fn cli() -> Result<()> {
     match &args.command {
         Some(Commands::Init { .. }) | Some(Commands::Setup { .. }) => unreachable!(),
         Some(Commands::Update {
+            profile,
             config,
             core,
             geodata,
@@ -157,7 +159,7 @@ async fn cli() -> Result<()> {
             if *all {
                 report
                     .run("config", Some("refreshing remote config"), || {
-                        mihoro.update_config(&client)
+                        mihoro.update_config(&client, profile.as_deref())
                     })
                     .await;
                 report
@@ -234,7 +236,7 @@ async fn cli() -> Result<()> {
             } else if *config || (!*core && !*geodata && !*ui) {
                 report
                     .run("config", Some("refreshing remote config"), || {
-                        mihoro.update_config(&client)
+                        mihoro.update_config(&client, profile.as_deref())
                     })
                     .await;
                 if !report.has_failures() && report.has_installed("config") {
@@ -263,7 +265,22 @@ async fn cli() -> Result<()> {
                 anyhow::bail!("one or more update stages failed - see summary above");
             }
         }
-        Some(Commands::Apply) => mihoro.apply().await?,
+        Some(Commands::Apply {
+            profile,
+            dry_run,
+            diff,
+        }) => {
+            mihoro
+                .apply(mihoro::ApplyOptions {
+                    profile: profile.as_deref(),
+                    dry_run: *dry_run,
+                    diff: *diff,
+                })
+                .await?
+        }
+        Some(Commands::Profile { profile }) => {
+            mihoro.profile_commands(&args.mihoro_config, profile)?;
+        }
         Some(Commands::Uninstall) => mihoro.uninstall()?,
         Some(Commands::Proxy { proxy }) => mihoro.proxy_commands(proxy)?,
 

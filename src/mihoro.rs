@@ -1,22 +1,23 @@
-use crate::cmd::{CronCommands, ProxyCommands};
-use crate::config::{parse_config, Config};
+use crate::cmd::{CronCommands, ProfileCommands, ProxyCommands};
+use crate::config::{parse_config, Config, ProfileConfig, ProfileSource};
 use crate::config_store::ConfigGenerationStore;
 use crate::cron;
 use crate::proxy::{proxy_export_cmd, proxy_unset_cmd};
 use crate::resolve_mihomo_bin;
+use crate::source::fetch_profile_source;
 use crate::systemctl::Systemctl;
 use crate::ui::{install_ui, resolve_external_ui_path};
 use crate::utils::{
     create_parent_dir, create_private_parent_dir, delete_file, download_file, extract_gzip,
-    redact_sensitive, try_decode_base64_file_inplace, DETAIL_PREFIX,
+    redact_sensitive, redact_sensitive_values, write_private_file, DETAIL_PREFIX,
 };
 
 use anyhow::Error;
 
-use std::fs;
 use std::os::unix::prelude::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::{collections::HashMap, fs};
 
 use anyhow::{anyhow, Result};
 use colored::Colorize;
@@ -24,6 +25,12 @@ use local_ip_address::local_ip;
 use reqwest::Client;
 use shellexpand::tilde;
 use tempfile::NamedTempFile;
+
+pub struct ApplyOptions<'a> {
+    pub profile: Option<&'a str>,
+    pub dry_run: bool,
+    pub diff: bool,
+}
 
 #[derive(Debug)]
 pub struct Mihoro {
@@ -82,7 +89,30 @@ impl Mihoro {
     }
 
     fn config_generation_store(&self) -> ConfigGenerationStore {
-        ConfigGenerationStore::new(&self.mihomo_target_config_root)
+        self.config_generation_store_for_profile(&self.config.active_profile)
+    }
+
+    fn config_generation_store_for_profile(&self, profile: &str) -> ConfigGenerationStore {
+        let profile_state_root = tilde(&self.config.profile_state_root);
+        ConfigGenerationStore::new_for_profile(
+            Path::new(profile_state_root.as_ref())
+                .join("profiles")
+                .join(profile),
+            Path::new(&self.mihomo_target_config_path),
+        )
+    }
+
+    fn selected_profile_name<'a>(&'a self, profile: Option<&'a str>) -> &'a str {
+        profile.unwrap_or(&self.config.active_profile)
+    }
+
+    fn selected_profile(&self, profile: Option<&str>) -> Result<(String, ProfileConfig)> {
+        let name = self.selected_profile_name(profile).to_string();
+        let config = self
+            .config
+            .effective_profile(&name)
+            .ok_or_else(|| anyhow!("profile `{}` not found", name))?;
+        Ok((name, config))
     }
 
     pub fn mihomo_binary_exists(&self) -> bool {
@@ -91,15 +121,18 @@ impl Mihoro {
 
     fn activate_candidate_config(&self) -> Result<bool> {
         let store = self.config_generation_store();
+        self.activate_candidate_config_for_store(&store)
+    }
+
+    fn activate_candidate_config_for_store(&self, store: &ConfigGenerationStore) -> Result<bool> {
         if store.candidate_matches_active_and_compat()? {
             return Ok(false);
         }
-        self.validate_candidate_config()?;
+        self.validate_candidate_config_for_store(store)?;
         store.activate_candidate()
     }
 
-    fn validate_candidate_config(&self) -> Result<()> {
-        let store = self.config_generation_store();
+    fn validate_candidate_config_for_store(&self, store: &ConfigGenerationStore) -> Result<()> {
         let candidate_path = store
             .paths
             .candidate_yaml
@@ -214,18 +247,20 @@ impl Mihoro {
 
         create_private_parent_dir(&store.paths.source_yaml)?;
         let staged_source = NamedTempFile::new_in(&store.paths.root)?;
-        download_file(
+        let (profile_name, profile_config) = self.selected_profile(None)?;
+        let headers = read_profile_headers(&self.config, &profile_name)?;
+        let user_agent = profile_config
+            .user_agent
+            .as_deref()
+            .unwrap_or(&self.config.mihoro_user_agent);
+        fetch_profile_source(
             client,
-            &self.config.remote_config_url,
+            &profile_config.source,
+            user_agent,
+            &headers,
             staged_source.path(),
-            &self.config.mihoro_user_agent,
         )
         .await?;
-        let staged_source_path = staged_source
-            .path()
-            .to_str()
-            .ok_or_else(|| anyhow!("staged source config path is not valid UTF-8"))?;
-        try_decode_base64_file_inplace(staged_source_path)?;
         store.install_source_from_stage(staged_source.path())?;
         store.render_candidate(&self.config.mihomo_config)?;
         if self.activate_candidate_config()? {
@@ -451,27 +486,31 @@ impl Mihoro {
         Ok(StageStatus::Installed)
     }
 
-    pub async fn update_config(&self, client: &Client) -> Result<StageStatus> {
-        let store = self.config_generation_store();
+    pub async fn update_config(
+        &self,
+        client: &Client,
+        profile: Option<&str>,
+    ) -> Result<StageStatus> {
+        let (profile_name, profile_config) = self.selected_profile(profile)?;
+        let store = self.config_generation_store_for_profile(&profile_name);
         store.seed_source_from_legacy_config()?;
 
         // Download remote mihomo config and apply override
         create_private_parent_dir(&store.paths.source_yaml)?;
         let staged_source = NamedTempFile::new_in(&store.paths.root)?;
-        download_file(
+        let headers = read_profile_headers(&self.config, &profile_name)?;
+        let user_agent = profile_config
+            .user_agent
+            .as_deref()
+            .unwrap_or(&self.config.mihoro_user_agent);
+        fetch_profile_source(
             client,
-            &self.config.remote_config_url,
+            &profile_config.source,
+            user_agent,
+            &headers,
             staged_source.path(),
-            &self.config.mihoro_user_agent,
         )
         .await?;
-
-        // Try to decode base64 file in place if file is base64 encoding, otherwise do nothing
-        let staged_source_path = staged_source
-            .path()
-            .to_str()
-            .ok_or_else(|| anyhow!("staged source config path is not valid UTF-8"))?;
-        try_decode_base64_file_inplace(staged_source_path)?;
         store.install_source_from_stage(staged_source.path())?;
 
         store.render_candidate(&self.config.mihomo_config)?;
@@ -575,11 +614,28 @@ impl Mihoro {
         }
     }
 
-    pub async fn apply(&self) -> Result<()> {
-        let store = self.config_generation_store();
+    pub async fn apply(&self, options: ApplyOptions<'_>) -> Result<()> {
+        let profile_name = self.selected_profile_name(options.profile);
+        let store = self.config_generation_store_for_profile(profile_name);
         store.seed_source_from_legacy_config()?;
         store.render_candidate(&self.config.mihomo_config)?;
-        let activated = self.activate_candidate_config()?;
+        if options.diff {
+            let headers = read_profile_headers(&self.config, profile_name)?;
+            let diff = store.render_redacted_diff()?;
+            print!(
+                "{}",
+                redact_sensitive_values(&diff, headers.values().map(String::as_str))
+            );
+        }
+        if options.dry_run {
+            self.validate_candidate_config_for_store(&store)?;
+            println!(
+                "{} Dry run succeeded; config was not activated",
+                self.prefix.green().bold()
+            );
+            return Ok(());
+        }
+        let activated = self.activate_candidate_config_for_store(&store)?;
         println!(
             "{} Applied mihomo config overrides",
             self.prefix.green().bold()
@@ -590,6 +646,99 @@ impl Mihoro {
             self.restart_service_with_config_rollback().await.map(|_| {
                 println!("{} Restarted mihomo.service", self.prefix.green().bold());
             })?;
+        }
+        Ok(())
+    }
+
+    pub fn profile_commands(
+        &self,
+        config_path: &str,
+        profile: &Option<ProfileCommands>,
+    ) -> Result<()> {
+        let Some(profile) = profile else {
+            return Ok(());
+        };
+        match profile {
+            ProfileCommands::Add {
+                name,
+                url,
+                file,
+                existing,
+                user_agent,
+                header,
+                force,
+            } => {
+                let mut config = Config::setup_from(tilde(config_path).as_ref())?;
+                if config.profiles.contains_key(name) && !force {
+                    anyhow::bail!("profile `{}` already exists; pass --force to replace", name);
+                }
+                let source = match (url, file, existing) {
+                    (Some(url), None, None) => ProfileSource::Url { url: url.clone() },
+                    (None, Some(path), None) => ProfileSource::File { path: path.clone() },
+                    (None, None, Some(path)) => ProfileSource::Existing { path: path.clone() },
+                    _ => anyhow::bail!("exactly one profile source is required"),
+                };
+                config.profiles.insert(
+                    name.clone(),
+                    ProfileConfig {
+                        source,
+                        user_agent: user_agent.clone(),
+                    },
+                );
+                if config.active_profile.is_empty() {
+                    config.active_profile = name.clone();
+                }
+                config.write(Path::new(tilde(config_path).as_ref()))?;
+                if !header.is_empty() {
+                    write_profile_headers(&config, name, header)?;
+                }
+                println!("{} Added profile `{}`", self.prefix.green(), name);
+            }
+            ProfileCommands::List => {
+                for name in self.config.profiles.keys() {
+                    let marker = if name == &self.config.active_profile {
+                        "*"
+                    } else {
+                        " "
+                    };
+                    println!("{marker} {name}");
+                }
+                if self.config.profiles.is_empty() && !self.config.remote_config_url.is_empty() {
+                    println!("* default (legacy remote_config_url)");
+                }
+            }
+            ProfileCommands::Show { name } => {
+                let profile = self
+                    .config
+                    .effective_profile(name)
+                    .ok_or_else(|| anyhow!("profile `{}` not found", name))?;
+                println!("{}", toml::to_string(&profile)?);
+            }
+            ProfileCommands::Use { name } => {
+                let mut config = Config::setup_from(tilde(config_path).as_ref())?;
+                if config.effective_profile(name).is_none() {
+                    anyhow::bail!("profile `{}` not found", name);
+                }
+                config.active_profile = name.clone();
+                config.write(Path::new(tilde(config_path).as_ref()))?;
+                println!("{} Active profile set to `{}`", self.prefix.green(), name);
+            }
+            ProfileCommands::Remove { name } => {
+                let mut config = Config::setup_from(tilde(config_path).as_ref())?;
+                if config.profiles.remove(name).is_none() {
+                    anyhow::bail!("profile `{}` not found", name);
+                }
+                if config.active_profile == *name {
+                    config.active_profile = config
+                        .profiles
+                        .keys()
+                        .next()
+                        .cloned()
+                        .unwrap_or_else(|| "default".to_string());
+                }
+                config.write(Path::new(tilde(config_path).as_ref()))?;
+                println!("{} Removed profile `{}`", self.prefix.green(), name);
+            }
         }
         Ok(())
     }
@@ -687,6 +836,45 @@ impl Mihoro {
                 resolve_external_ui_path(&self.mihomo_target_config_root, external_ui)
             })
     }
+}
+
+fn write_profile_headers(config: &Config, name: &str, header: &[String]) -> Result<()> {
+    let mut headers = HashMap::new();
+    for item in header {
+        let (key, value) = item
+            .split_once('=')
+            .ok_or_else(|| anyhow!("header `{}` must use KEY=VALUE syntax", item))?;
+        if key.trim().is_empty() {
+            anyhow::bail!("header key cannot be empty");
+        }
+        headers.insert(key.trim().to_string(), value.trim().to_string());
+    }
+    let profile_data_root = tilde(&config.profile_data_root);
+    let path = Path::new(profile_data_root.as_ref())
+        .join("profiles")
+        .join(name)
+        .join("metadata.toml");
+    let serialized = toml::to_string(&toml::toml! { headers = headers })?;
+    write_private_file(&path, serialized.as_bytes())
+}
+
+fn read_profile_headers(config: &Config, name: &str) -> Result<HashMap<String, String>> {
+    #[derive(serde::Deserialize)]
+    struct Metadata {
+        #[serde(default)]
+        headers: HashMap<String, String>,
+    }
+
+    let profile_data_root = tilde(&config.profile_data_root);
+    let path = Path::new(profile_data_root.as_ref())
+        .join("profiles")
+        .join(name)
+        .join("metadata.toml");
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    let metadata: Metadata = toml::from_str(&fs::read_to_string(path)?)?;
+    Ok(metadata.headers)
 }
 
 fn installed_mihomo_version(binary_path: &str) -> Result<Option<String>> {
@@ -930,12 +1118,14 @@ mod tests {
         let dir = tempdir()?;
         let config_path = dir.path().join("test.toml");
         let yaml_path = dir.path().join("config.yaml");
+        let profile_state_root = dir.path().join("state");
 
         // Write config with custom port override
         let toml_content = r#"
             remote_config_url = "http://example.com/config.yaml"
             mihomo_binary_path = "/tmp/test/mihomo"
             mihomo_config_root = "{}"
+            profile_state_root = "{}"
             user_systemd_root = "/tmp/test/systemd"
 
             [mihomo_config]
@@ -944,7 +1134,9 @@ mod tests {
         "#;
         fs::write(
             &config_path,
-            toml_content.replace("{}", dir.path().to_str().unwrap()),
+            toml_content
+                .replacen("{}", dir.path().to_str().unwrap(), 1)
+                .replacen("{}", profile_state_root.to_str().unwrap(), 1),
         )?;
 
         // Write initial mihomo config
@@ -978,11 +1170,13 @@ mod tests {
         let dir = tempdir()?;
         let config_path = dir.path().join("test.toml");
         let yaml_path = dir.path().join("config.yaml");
+        let profile_state_root = dir.path().join("state");
 
         let toml_content = r#"
             remote_config_url = "http://example.com/config.yaml"
             mihomo_binary_path = "/tmp/test/mihomo"
             mihomo_config_root = "{}"
+            profile_state_root = "{}"
             user_systemd_root = "/tmp/test/systemd"
 
             [mihomo_config]
@@ -991,7 +1185,9 @@ mod tests {
         "#;
         fs::write(
             &config_path,
-            toml_content.replace("{}", dir.path().to_str().unwrap()),
+            toml_content
+                .replacen("{}", dir.path().to_str().unwrap(), 1)
+                .replacen("{}", profile_state_root.to_str().unwrap(), 1),
         )?;
 
         let yaml_content = r#"
@@ -1018,16 +1214,17 @@ mod tests {
             StageStatus::Failed(_) => panic!("ensure_remote_config returned a failed status"),
         }
         assert_eq!(fs::read_to_string(&yaml_path)?, current_content);
+        let profile_root = profile_state_root.join("profiles/default");
         assert_eq!(
-            fs::read_to_string(dir.path().join("source.yaml"))?,
+            fs::read_to_string(profile_root.join("source.yaml"))?,
             current_content
         );
         assert_eq!(
-            fs::read_to_string(dir.path().join("active.yaml"))?,
+            fs::read_to_string(profile_root.join("active.yaml"))?,
             current_content
         );
-        assert!(fs::read_to_string(dir.path().join("candidate.yaml"))?.contains("port: 9999"));
-        assert!(fs::read_to_string(dir.path().join("overlay.yaml"))?.contains("port: 9999"));
+        assert!(fs::read_to_string(profile_root.join("candidate.yaml"))?.contains("port: 9999"));
+        assert!(fs::read_to_string(profile_root.join("overlay.yaml"))?.contains("port: 9999"));
 
         let status = mihoro.ensure_remote_config(&Client::new(), false).await?;
         match status {
@@ -1035,6 +1232,109 @@ mod tests {
             StageStatus::Installed => panic!("expected remote config to be skipped"),
             StageStatus::Failed(_) => panic!("ensure_remote_config returned a failed status"),
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn profile_add_stores_headers_in_private_metadata() -> Result<()> {
+        let dir = tempdir()?;
+        let config_path = dir.path().join("mihoro.toml");
+        let profile_data_root = dir.path().join("data");
+
+        let mut config = Config::new();
+        config.remote_config_url = "https://example.com/legacy.yaml".to_string();
+        config.profile_data_root = profile_data_root.to_string_lossy().to_string();
+        config.write(&config_path)?;
+
+        let mihoro = Mihoro::from_config(config);
+        mihoro.profile_commands(
+            config_path.to_str().unwrap(),
+            &Some(ProfileCommands::Add {
+                name: "work".to_string(),
+                url: Some("https://example.com/sub.yaml".to_string()),
+                file: None,
+                existing: None,
+                user_agent: Some("mihoro-test".to_string()),
+                header: vec!["Authorization=Bearer token".to_string()],
+                force: false,
+            }),
+        )?;
+
+        let main_config = fs::read_to_string(&config_path)?;
+        assert!(main_config.contains("[profiles.work]"));
+        assert!(!main_config.contains("Bearer token"));
+
+        let metadata_path = profile_data_root.join("profiles/work/metadata.toml");
+        let metadata = fs::read_to_string(&metadata_path)?;
+        assert!(metadata.contains("Authorization"));
+        assert!(metadata.contains("Bearer token"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(metadata_path)?.permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn apply_dry_run_renders_candidate_without_activation() -> Result<()> {
+        let dir = tempdir()?;
+        let binary_path = dir.path().join("mihomo");
+        fs::write(&binary_path, "#!/bin/sh\nexit 0\n")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&binary_path, fs::Permissions::from_mode(0o755))?;
+        }
+
+        let runtime_root = dir.path().join("runtime");
+        let profile_state_root = dir.path().join("state");
+        let profile_root = profile_state_root.join("profiles/default");
+        fs::create_dir_all(&profile_root)?;
+        fs::create_dir_all(&runtime_root)?;
+        fs::write(
+            profile_root.join("source.yaml"),
+            "port: 8080\nsocks-port: 8081\nproxies: []\n",
+        )?;
+        fs::write(
+            profile_root.join("active.yaml"),
+            "port: 8080\nsocks-port: 8081\nproxies: []\n",
+        )?;
+        fs::write(
+            runtime_root.join("config.yaml"),
+            "port: 8080\nsocks-port: 8081\nproxies: []\n",
+        )?;
+
+        let mut config = Config::new();
+        config.remote_config_url = "https://example.com/sub.yaml".to_string();
+        config.mihomo_binary_path = binary_path.to_string_lossy().to_string();
+        config.mihomo_config_root = runtime_root.to_string_lossy().to_string();
+        config.profile_state_root = profile_state_root.to_string_lossy().to_string();
+        config.mihomo_config.port = 9999;
+        config.mihomo_config.socks_port = 9998;
+        let mihoro = Mihoro::from_config(config);
+
+        mihoro
+            .apply(ApplyOptions {
+                profile: None,
+                dry_run: true,
+                diff: true,
+            })
+            .await?;
+
+        assert!(fs::read_to_string(profile_root.join("candidate.yaml"))?.contains("port: 9999"));
+        assert_eq!(
+            fs::read_to_string(profile_root.join("active.yaml"))?,
+            "port: 8080\nsocks-port: 8081\nproxies: []\n"
+        );
+        assert_eq!(
+            fs::read_to_string(runtime_root.join("config.yaml"))?,
+            "port: 8080\nsocks-port: 8081\nproxies: []\n"
+        );
 
         Ok(())
     }

@@ -45,6 +45,10 @@ pub enum Commands {
     },
     /// Update mihomo components (config by default)
     Update {
+        /// Profile to update; defaults to the active profile
+        #[arg(long)]
+        profile: Option<String>,
+
         /// Update remote config
         #[arg(long)]
         config: bool,
@@ -76,7 +80,24 @@ pub enum Commands {
         arch: Option<String>,
     },
     /// Apply mihomo config overrides and restart mihomo.service
-    Apply,
+    Apply {
+        /// Profile to apply; defaults to the active profile
+        #[arg(long)]
+        profile: Option<String>,
+
+        /// Render and validate without activating config or restarting service
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Print a redacted semantic diff between active and candidate config
+        #[arg(long)]
+        diff: bool,
+    },
+    /// Manage named config profiles
+    Profile {
+        #[clap(subcommand)]
+        profile: Option<ProfileCommands>,
+    },
     /// Start mihomo.service with systemctl
     Start,
     /// Check mihomo.service status with systemctl
@@ -131,6 +152,57 @@ pub enum ProxyCommands {
     ExportLan,
     /// Output and copy proxy unset shell commands
     Unset,
+}
+
+#[derive(Subcommand)]
+#[command(arg_required_else_help(true))]
+pub enum ProfileCommands {
+    /// Add or replace a named profile
+    Add {
+        /// Profile name
+        name: String,
+
+        /// Subscription URL source
+        #[arg(long, conflicts_with_all = ["file", "existing"], required_unless_present_any = ["file", "existing"])]
+        url: Option<String>,
+
+        /// Local file source copied into the profile
+        #[arg(long, conflicts_with_all = ["url", "existing"])]
+        file: Option<String>,
+
+        /// Existing config source imported into the profile
+        #[arg(long, conflicts_with_all = ["url", "file"])]
+        existing: Option<String>,
+
+        /// Per-profile User-Agent for URL sources
+        #[arg(long)]
+        user_agent: Option<String>,
+
+        /// Per-profile HTTP header in KEY=VALUE form; may be repeated
+        #[arg(long = "header")]
+        header: Vec<String>,
+
+        /// Replace an existing profile
+        #[arg(long)]
+        force: bool,
+    },
+    /// List profiles
+    List,
+    /// Show one profile
+    Show {
+        /// Profile name
+        name: String,
+    },
+    /// Make a profile active
+    Use {
+        /// Profile name
+        name: String,
+    },
+    /// Remove a profile
+    Remove {
+        /// Profile name
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -194,6 +266,78 @@ mod tests {
                 assert!(!ui);
             }
             _ => panic!("expected update command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_profile_add_url_with_headers() {
+        let args = Args::parse_from([
+            "mihoro",
+            "profile",
+            "add",
+            "work",
+            "--url",
+            "https://example.com/sub",
+            "--user-agent",
+            "mihoro-test",
+            "--header",
+            "Authorization=Bearer token",
+        ]);
+
+        match args.command {
+            Some(Commands::Profile {
+                profile:
+                    Some(ProfileCommands::Add {
+                        name,
+                        url,
+                        file,
+                        existing,
+                        user_agent,
+                        header,
+                        force,
+                    }),
+            }) => {
+                assert_eq!(name, "work");
+                assert_eq!(url.as_deref(), Some("https://example.com/sub"));
+                assert!(file.is_none());
+                assert!(existing.is_none());
+                assert_eq!(user_agent.as_deref(), Some("mihoro-test"));
+                assert_eq!(header, vec!["Authorization=Bearer token".to_string()]);
+                assert!(!force);
+            }
+            _ => panic!("expected profile add command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_update_profile_and_apply_dry_run_diff() {
+        let update = Args::parse_from(["mihoro", "update", "--profile", "work"]);
+        match update.command {
+            Some(Commands::Update { profile, .. }) => {
+                assert_eq!(profile.as_deref(), Some("work"));
+            }
+            _ => panic!("expected update command"),
+        }
+
+        let apply = Args::parse_from([
+            "mihoro",
+            "apply",
+            "--profile",
+            "work",
+            "--dry-run",
+            "--diff",
+        ]);
+        match apply.command {
+            Some(Commands::Apply {
+                profile,
+                dry_run,
+                diff,
+            }) => {
+                assert_eq!(profile.as_deref(), Some("work"));
+                assert!(dry_run);
+                assert!(diff);
+            }
+            _ => panic!("expected apply command"),
         }
     }
 }
