@@ -6,8 +6,8 @@ edition = "2021"
 readme = "README.md"
 license = "MIT"
 authors = ["spencerwooo <spencer.woo@outlook.com>"]
-homepage = "https://github.com/spencerwooo/mihoro"
-repository = "https://github.com/spencerwooo/mihoro"
+homepage = "https://github.com/Pectics/mihoto"
+repository = "https://github.com/Pectics/mihoto"
 keywords = ["cli", "clash", "network", "linux", "mihomo"]
 categories = ["command-line-utilities"]
 
