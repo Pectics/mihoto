@@ -95,7 +95,7 @@ bind_address = "*"
 mode = "rule"
 log_level = "info"
 ipv6 = true
-external_controller = "0.0.0.0:9090"
+external_controller = "127.0.0.1:9090"
 external_ui = "ui"
 geodata_mode = false
 geo_auto_update = true
@@ -107,7 +107,7 @@ geosite = "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/ge
 mmdb = "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb"
 ```
 
-By default, `ui = "metacubexd"` enables dashboard management, so `mihoro init` also downloads the web UI assets and serves them from the configured `external_controller`. When the controller binds all interfaces, `mihoro init` prints localhost plus detected non-loopback machine IPs such as LAN or Tailscale/ZeroTier addresses.
+By default, `ui = "metacubexd"` enables dashboard management, so `mihoro init` also downloads the web UI assets and serves them from the configured `external_controller`. The generated controller binds to `127.0.0.1:9090`; if you bind it to a non-loopback address, set `mihomo_config.secret` or explicitly export `MIHORO_ALLOW_INSECURE_CONTROLLER=1`. When the controller binds all interfaces, `mihoro init` prints localhost plus detected non-loopback machine IPs such as LAN or Tailscale/ZeroTier addresses.
 
 Mihoro keeps generated Mihomo config state under `mihomo_config_root`. The runtime-compatible `config.yaml` remains the file consumed by `mihomo -d <root>`, while `source.yaml`, `overlay.yaml`, `candidate.yaml`, `active.yaml`, and `last-good.yaml` preserve the raw subscription config, local override projection, render candidate, current active config, and previous active config for transactional activation and rollback.
 

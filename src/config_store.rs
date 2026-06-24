@@ -1,5 +1,5 @@
 use crate::config::{render_mihomo_overlay, render_mihomo_override, MihomoConfig};
-use crate::utils::create_parent_dir;
+use crate::utils::{create_parent_dir, create_private_parent_dir, set_private_file_permissions};
 use anyhow::{Context, Result};
 use std::fs;
 use std::io::Write;
@@ -100,14 +100,15 @@ impl ConfigGenerationStore {
     }
 
     pub fn install_source_from_stage(&self, staged_path: &Path) -> Result<()> {
-        create_parent_dir(&self.paths.source_yaml)?;
+        create_private_parent_dir(&self.paths.source_yaml)?;
         fs::rename(staged_path, &self.paths.source_yaml).with_context(|| {
             format!(
                 "failed to replace `{}` with staged source `{}`",
                 self.paths.source_yaml.display(),
                 staged_path.display()
             )
-        })
+        })?;
+        set_private_file_permissions(&self.paths.source_yaml)
     }
 
     pub fn activate_candidate(&self) -> Result<bool> {
@@ -128,14 +129,11 @@ impl ConfigGenerationStore {
 
         if let Some(active) = active {
             if active != candidate {
-                create_parent_dir(&self.paths.last_good_yaml)?;
                 atomic_write(&self.paths.last_good_yaml, &active)?;
             }
         }
 
-        create_parent_dir(&self.paths.active_yaml)?;
         atomic_write(&self.paths.active_yaml, &candidate)?;
-        create_parent_dir(&self.paths.compat_config_yaml)?;
         atomic_write(&self.paths.compat_config_yaml, &candidate)?;
         Ok(true)
     }
@@ -173,9 +171,7 @@ impl ConfigGenerationStore {
             }
         };
 
-        create_parent_dir(&self.paths.active_yaml)?;
         atomic_write(&self.paths.active_yaml, &last_good)?;
-        create_parent_dir(&self.paths.compat_config_yaml)?;
         atomic_write(&self.paths.compat_config_yaml, &last_good)?;
         Ok(true)
     }
@@ -198,11 +194,12 @@ impl ConfigGenerationStore {
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
-    create_parent_dir(path)?;
+    create_private_parent_dir(path)?;
     let parent = path
         .parent()
         .with_context(|| format!("parent directory of `{}` invalid", path.display()))?;
     let mut temp = NamedTempFile::new_in(parent)?;
+    set_private_file_permissions(temp.path())?;
     temp.write_all(bytes)?;
     temp.as_file().sync_all()?;
     temp.persist(path)
