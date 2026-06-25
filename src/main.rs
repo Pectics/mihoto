@@ -2,10 +2,12 @@ mod cmd;
 mod config;
 mod config_store;
 mod cron;
+mod deployment;
 mod init;
 mod mihoro;
 mod proxy;
 mod resolve_mihomo_bin;
+mod schedule;
 mod source;
 mod systemctl;
 mod ui;
@@ -292,7 +294,7 @@ async fn cli() -> Result<()> {
             mihoro.deploy_commands(&args.mihoro_config, deploy).await?;
         }
         Some(Commands::Schedule { schedule }) => {
-            mihoro.schedule_commands(schedule)?;
+            mihoro.schedule_commands(&args.mihoro_config, schedule)?;
         }
         Some(Commands::Uninstall) => mihoro.uninstall()?,
         Some(Commands::Proxy { proxy }) => mihoro.proxy_commands(proxy)?,

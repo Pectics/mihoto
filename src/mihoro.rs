@@ -1,9 +1,22 @@
-use crate::cmd::{CronCommands, DeployCommands, ProfileCommands, ProxyCommands, ScheduleCommands};
-use crate::config::{parse_config, Config, DeploymentBackend, ProfileConfig, ProfileSource};
+use crate::cmd::{
+    CronCommands, DeployCommands, DeploymentBackendArg, ProfileCommands, ProxyCommands,
+    ScheduleCommands, SchedulerBackendArg,
+};
+use crate::config::{
+    parse_config, Config, DeploymentBackend, ProfileConfig, ProfileSource, SchedulerBackend,
+};
 use crate::config_store::ConfigGenerationStore;
 use crate::cron;
+use crate::deployment::{
+    create_rollback_record, plan_unit_write, read_rollback_record, render_mihomo_service_unit,
+    system_service_identity, ServiceScope, ServiceUnitSpec,
+};
 use crate::proxy::{proxy_export_cmd, proxy_unset_cmd};
 use crate::resolve_mihomo_bin;
+use crate::schedule::{
+    managed_unit_content, render_update_service_unit, render_update_timer_unit, TimerInstallPaths,
+    UpdateServiceSpec, UpdateTimerSpec, UPDATE_TIMER_UNIT,
+};
 use crate::source::fetch_profile_source;
 use crate::systemctl::{Systemctl, SystemdScope};
 use crate::ui::{install_ui, resolve_external_ui_path};
@@ -17,9 +30,10 @@ use anyhow::Error;
 use std::os::unix::prelude::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::{collections::HashMap, fs};
+use std::time::{SystemTime, UNIX_EPOCH};
+use std::{collections::HashMap, env, fs};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use colored::Colorize;
 use local_ip_address::local_ip;
 use reqwest::Client;
@@ -118,6 +132,22 @@ impl Mihoro {
 
     pub fn systemd_scope(&self) -> SystemdScope {
         self.systemd_scope
+    }
+
+    fn systemctl(&self) -> Systemctl {
+        Systemctl::with_scope(self.systemd_scope)
+    }
+
+    #[cfg(test)]
+    fn service_systemctl_args(&self, action: crate::systemctl::SystemdAction) -> Vec<String> {
+        crate::systemctl::systemctl_args(self.systemd_scope, action, "mihomo.service")
+    }
+
+    fn service_scope(&self) -> ServiceScope {
+        match self.systemd_scope {
+            SystemdScope::User => ServiceScope::User,
+            SystemdScope::System => ServiceScope::System,
+        }
     }
 
     fn config_generation_store(&self) -> ConfigGenerationStore {
@@ -246,7 +276,7 @@ impl Mihoro {
                 "{} Stopping mihomo.service before overwriting binary...",
                 DETAIL_PREFIX.cyan()
             );
-            Systemctl::new().stop("mihomo.service").execute()?;
+            self.systemctl().stop("mihomo.service").execute()?;
         }
 
         extract_gzip(
@@ -380,18 +410,29 @@ impl Mihoro {
 
     /// Write the systemd unit file.  Skips if the file already exists with identical content.
     pub async fn ensure_service(&self) -> Result<StageStatus> {
+        self.write_service_unit(false)
+    }
+
+    fn write_service_unit(&self, adopt_existing_unit: bool) -> Result<StageStatus> {
         let service_content = render_service_string(
             &self.mihomo_target_binary_path,
             &self.mihomo_target_config_root,
+            self.service_scope(),
         );
-        if let Ok(existing) = fs::read_to_string(&self.mihomo_target_service_path) {
-            if existing == service_content {
+        let existing = fs::read_to_string(&self.mihomo_target_service_path).ok();
+        if let Some(existing_content) = existing.as_deref() {
+            if existing_content == service_content {
                 return Ok(StageStatus::Skipped("service file unchanged".to_string()));
             }
         }
+        let write_plan = plan_unit_write(existing.as_deref(), adopt_existing_unit)?;
+        if write_plan.backup_required {
+            self.backup_service_unit()?;
+        }
+        self.ensure_service_identity()?;
         create_parent_dir(Path::new(&self.mihomo_target_service_path))?;
         fs::write(&self.mihomo_target_service_path, &service_content)?;
-        Systemctl::new().daemon_reload().execute()?;
+        self.systemctl().daemon_reload().execute()?;
         println!(
             "{} Created mihomo.service at {}",
             DETAIL_PREFIX.cyan(),
@@ -400,13 +441,40 @@ impl Mihoro {
         Ok(StageStatus::Installed)
     }
 
+    fn backup_service_unit(&self) -> Result<PathBuf> {
+        let service_path = Path::new(&self.mihomo_target_service_path);
+        let backup_path = service_path.with_extension(format!("service.{}.bak", unix_timestamp()));
+        fs::copy(service_path, &backup_path)?;
+        println!(
+            "{} Backed up existing mihomo.service to {}",
+            DETAIL_PREFIX.cyan(),
+            backup_path.display()
+        );
+        Ok(backup_path)
+    }
+
+    fn ensure_service_identity(&self) -> Result<()> {
+        if self.service_scope() != ServiceScope::System {
+            return Ok(());
+        }
+        let identity = system_service_identity();
+        println!(
+            "{} Ensuring system service identity {}:{}",
+            DETAIL_PREFIX.cyan(),
+            identity.user,
+            identity.group
+        );
+        run_shell_command("create mihomo system group", &identity.group_create_command)?;
+        run_shell_command("create mihomo system user", &identity.user_create_command)
+    }
+
     /// Enable and start mihomo.service, ensuring both autostart and current-session state.
     ///
     /// Always enables mihomo.service so it survives reboots, even if it was already running but
     /// not enabled (e.g. started manually after a previous failed init).
     pub async fn ensure_service_running(&self) -> Result<StageStatus> {
-        let is_active = Systemctl::is_active("mihomo.service");
-        let is_enabled = Systemctl::is_enabled("mihomo.service");
+        let is_active = Systemctl::is_active_scoped(self.systemd_scope, "mihomo.service");
+        let is_enabled = Systemctl::is_enabled_scoped(self.systemd_scope, "mihomo.service");
 
         if is_active && is_enabled {
             return Ok(StageStatus::Skipped(
@@ -415,10 +483,10 @@ impl Mihoro {
         }
 
         if !is_enabled {
-            Systemctl::new().enable("mihomo.service").execute()?;
+            self.systemctl().enable("mihomo.service").execute()?;
         }
         if !is_active {
-            Systemctl::new().start("mihomo.service").execute()?;
+            self.systemctl().start("mihomo.service").execute()?;
         }
         Ok(StageStatus::Installed)
     }
@@ -502,7 +570,7 @@ impl Mihoro {
             "{} Stopping mihomo.service before overwriting...",
             DETAIL_PREFIX.yellow()
         );
-        Systemctl::new().stop("mihomo.service").execute()?;
+        self.systemctl().stop("mihomo.service").execute()?;
 
         // Extract and overwrite the binary
         extract_gzip(
@@ -615,21 +683,23 @@ impl Mihoro {
 
     pub async fn restart_service(&self) -> Result<StageStatus> {
         println!("{} Restarting mihomo.service...", DETAIL_PREFIX.cyan());
-        Systemctl::new().restart("mihomo.service").execute()?;
+        self.systemctl().restart("mihomo.service").execute()?;
         Ok(StageStatus::Installed)
     }
 
     pub async fn restart_service_with_config_rollback(&self) -> Result<StageStatus> {
         println!("{} Restarting mihomo.service...", DETAIL_PREFIX.cyan());
-        let restart_result = Systemctl::new().restart("mihomo.service").execute();
-        if restart_result.is_ok() && Systemctl::is_active("mihomo.service") {
+        let restart_result = self.systemctl().restart("mihomo.service").execute();
+        if restart_result.is_ok()
+            && Systemctl::is_active_scoped(self.systemd_scope, "mihomo.service")
+        {
             return Ok(StageStatus::Installed);
         }
 
         let store = self.config_generation_store();
         let restored = store.restore_last_good()?;
         if restored {
-            let _ = Systemctl::new().restart("mihomo.service").execute();
+            let _ = self.systemctl().restart("mihomo.service").execute();
         }
 
         match restart_result {
@@ -776,14 +846,14 @@ impl Mihoro {
     }
 
     pub fn uninstall(&self) -> Result<()> {
-        Systemctl::new().stop("mihomo.service").execute()?;
-        Systemctl::new().disable("mihomo.service").execute()?;
+        self.systemctl().stop("mihomo.service").execute()?;
+        self.systemctl().disable("mihomo.service").execute()?;
 
         delete_file(&self.mihomo_target_service_path, self.prefix.cyan())?;
         delete_file(&self.mihomo_target_config_path, self.prefix.cyan())?;
 
-        Systemctl::new().daemon_reload().execute()?;
-        Systemctl::new().reset_failed().execute()?;
+        self.systemctl().daemon_reload().execute()?;
+        self.systemctl().reset_failed().execute()?;
         println!(
             "{} Disabled and reloaded systemd services",
             self.prefix.green()
@@ -848,7 +918,7 @@ impl Mihoro {
 
     pub async fn deploy_commands(
         &self,
-        _config_path: &str,
+        config_path: &str,
         command: &Option<DeployCommands>,
     ) -> Result<()> {
         match command {
@@ -864,18 +934,90 @@ impl Mihoro {
                     self.mihomo_target_service_path
                 );
             }
-            Some(DeployCommands::Apply { .. })
-            | Some(DeployCommands::Import { .. })
-            | Some(DeployCommands::Migrate { .. })
-            | Some(DeployCommands::Rollback { .. }) => {
-                anyhow::bail!("deploy command is not implemented yet")
+            Some(DeployCommands::Apply {
+                backend,
+                dry_run,
+                adopt_existing_unit,
+            }) => {
+                let target_backend = deployment_backend_from_arg(*backend);
+                if *dry_run {
+                    println!(
+                        "{} Would apply deployment backend: {:?} -> {:?}",
+                        self.prefix.cyan(),
+                        self.config.deployment.backend,
+                        target_backend
+                    );
+                    return Ok(());
+                }
+                write_deployment_backend(config_path, target_backend)?;
+                let target_mihoro = Mihoro::new(config_path)?;
+                target_mihoro.write_service_unit(*adopt_existing_unit)?;
+                println!(
+                    "{} Deployment backend set to {:?}",
+                    self.prefix.green(),
+                    target_backend
+                );
+            }
+            Some(DeployCommands::Migrate {
+                to,
+                dry_run,
+                adopt_existing_unit: _,
+            }) => {
+                let target_backend = deployment_backend_from_arg(*to);
+                if *dry_run {
+                    println!(
+                        "{} Would migrate deployment backend: {:?} -> {:?}",
+                        self.prefix.cyan(),
+                        self.config.deployment.backend,
+                        target_backend
+                    );
+                    return Ok(());
+                }
+                prepare_target_deployment_runtime(&self.config, target_backend)?;
+                let record = create_rollback_record(
+                    &self.config.profile_state_root,
+                    self.config.deployment.backend,
+                    target_backend,
+                    None,
+                )?;
+                write_deployment_backend(config_path, target_backend)?;
+                if target_backend == DeploymentBackend::SystemdSystem {
+                    cleanup_user_backend_after_system_migration(&self.config)?;
+                }
+                println!(
+                    "{} Deployment backend migrated to {:?} (rollback id: {})",
+                    self.prefix.green(),
+                    target_backend,
+                    record.id
+                );
+            }
+            Some(DeployCommands::Rollback { id }) => {
+                let record = read_rollback_record(&self.config.profile_state_root, id.as_deref())?;
+                write_deployment_backend(config_path, record.previous_backend)?;
+                println!(
+                    "{} Deployment backend rolled back to {:?} (rollback id: {})",
+                    self.prefix.green(),
+                    record.previous_backend,
+                    record.id
+                );
+            }
+            Some(DeployCommands::Import {
+                from_mihoro,
+                dry_run,
+                cleanup,
+            }) => {
+                import_mihoro_config(config_path, from_mihoro, *dry_run, *cleanup)?;
             }
             None => {}
         }
         Ok(())
     }
 
-    pub fn schedule_commands(&self, command: &Option<ScheduleCommands>) -> Result<()> {
+    pub fn schedule_commands(
+        &self,
+        config_path: &str,
+        command: &Option<ScheduleCommands>,
+    ) -> Result<()> {
         match command {
             Some(ScheduleCommands::Status) => {
                 println!(
@@ -883,9 +1025,43 @@ impl Mihoro {
                     self.prefix.green(),
                     self.config.scheduler.backend
                 );
+                if self.config.scheduler.backend == SchedulerBackend::SystemdTimer {
+                    let paths = TimerInstallPaths::for_backend(
+                        self.config.deployment.backend,
+                        &self.config.user_systemd_root,
+                    );
+                    println!("{} Timer: {}", "->".dimmed(), paths.timer_path.display());
+                }
             }
-            Some(ScheduleCommands::Enable { .. }) | Some(ScheduleCommands::Disable) => {
-                anyhow::bail!("schedule command is not implemented yet")
+            Some(ScheduleCommands::Enable {
+                backend,
+                on_calendar,
+                randomized_delay_sec,
+            }) => {
+                let scheduler_backend = backend
+                    .map(scheduler_backend_from_arg)
+                    .unwrap_or(self.config.scheduler.backend);
+                write_scheduler_config(
+                    config_path,
+                    scheduler_backend,
+                    on_calendar.clone(),
+                    randomized_delay_sec.clone(),
+                )?;
+                match scheduler_backend {
+                    SchedulerBackend::Cron => {
+                        cron::enable_auto_update(self.config.auto_update_interval, &self.prefix)?;
+                    }
+                    SchedulerBackend::SystemdTimer => {
+                        self.enable_systemd_timer(config_path, on_calendar, randomized_delay_sec)?;
+                    }
+                }
+            }
+            Some(ScheduleCommands::Disable) => {
+                match self.config.scheduler.backend {
+                    SchedulerBackend::Cron => cron::disable_auto_update(&self.prefix)?,
+                    SchedulerBackend::SystemdTimer => self.disable_systemd_timer()?,
+                }
+                println!("{} Disabled scheduled updates", self.prefix.green());
             }
             None => {}
         }
@@ -913,6 +1089,76 @@ impl Mihoro {
             .map(|external_ui| {
                 resolve_external_ui_path(&self.mihomo_target_config_root, external_ui)
             })
+    }
+
+    fn enable_systemd_timer(
+        &self,
+        config_path: &str,
+        on_calendar: &Option<String>,
+        randomized_delay_sec: &Option<String>,
+    ) -> Result<()> {
+        let paths = TimerInstallPaths::for_backend(
+            self.config.deployment.backend,
+            &self.config.user_systemd_root,
+        );
+        let mihoro_bin = env::current_exe()?;
+        let mihoro_bin = mihoro_bin
+            .to_str()
+            .ok_or_else(|| anyhow!("current mihoro binary path is not valid UTF-8"))?;
+        let on_calendar = on_calendar
+            .as_deref()
+            .or(self.config.scheduler.on_calendar.as_deref())
+            .unwrap_or("0/12:00:00");
+        let randomized_delay_sec = randomized_delay_sec.as_deref().or(self
+            .config
+            .scheduler
+            .randomized_delay_sec
+            .as_deref());
+
+        let service = render_update_service_unit(&UpdateServiceSpec {
+            mihoro_bin,
+            config_path,
+        });
+        let timer = render_update_timer_unit(&UpdateTimerSpec {
+            on_calendar,
+            persistent: self.config.scheduler.persistent,
+            randomized_delay_sec,
+        });
+        write_managed_timer_unit(&paths.service_path, &service)?;
+        write_managed_timer_unit(&paths.timer_path, &timer)?;
+        Systemctl::with_scope(paths.scope.systemd_scope())
+            .daemon_reload()
+            .execute()?;
+        Systemctl::with_scope(paths.scope.systemd_scope())
+            .enable(UPDATE_TIMER_UNIT)
+            .execute()?;
+        Systemctl::with_scope(paths.scope.systemd_scope())
+            .start(UPDATE_TIMER_UNIT)
+            .execute()?;
+        println!(
+            "{} Enabled scheduled updates with {}",
+            self.prefix.green(),
+            UPDATE_TIMER_UNIT
+        );
+        Ok(())
+    }
+
+    fn disable_systemd_timer(&self) -> Result<()> {
+        let paths = TimerInstallPaths::for_backend(
+            self.config.deployment.backend,
+            &self.config.user_systemd_root,
+        );
+        let scope = paths.scope.systemd_scope();
+        let _ = Systemctl::with_scope(scope)
+            .stop(UPDATE_TIMER_UNIT)
+            .execute();
+        let _ = Systemctl::with_scope(scope)
+            .disable(UPDATE_TIMER_UNIT)
+            .execute();
+        remove_managed_timer_unit(&paths.timer_path)?;
+        remove_managed_timer_unit(&paths.service_path)?;
+        Systemctl::with_scope(scope).daemon_reload().execute()?;
+        Ok(())
     }
 }
 
@@ -953,6 +1199,282 @@ fn read_profile_headers(config: &Config, name: &str) -> Result<HashMap<String, S
     }
     let metadata: Metadata = toml::from_str(&fs::read_to_string(path)?)?;
     Ok(metadata.headers)
+}
+
+fn deployment_backend_from_arg(backend: DeploymentBackendArg) -> DeploymentBackend {
+    match backend {
+        DeploymentBackendArg::SystemdUser => DeploymentBackend::SystemdUser,
+        DeploymentBackendArg::SystemdSystem => DeploymentBackend::SystemdSystem,
+    }
+}
+
+fn scheduler_backend_from_arg(backend: SchedulerBackendArg) -> SchedulerBackend {
+    match backend {
+        SchedulerBackendArg::SystemdTimer => SchedulerBackend::SystemdTimer,
+        SchedulerBackendArg::Cron => SchedulerBackend::Cron,
+    }
+}
+
+fn write_deployment_backend(config_path: &str, backend: DeploymentBackend) -> Result<()> {
+    let expanded_config_path = tilde(config_path);
+    let path = Path::new(expanded_config_path.as_ref());
+    let mut config =
+        Config::setup_from(path.to_str().ok_or_else(|| {
+            anyhow!("mihoro config path `{}` is not valid UTF-8", path.display())
+        })?)?;
+    config.deployment.backend = backend;
+    config.write(path)
+}
+
+fn write_scheduler_config(
+    config_path: &str,
+    backend: SchedulerBackend,
+    on_calendar: Option<String>,
+    randomized_delay_sec: Option<String>,
+) -> Result<()> {
+    let expanded_config_path = tilde(config_path);
+    let path = Path::new(expanded_config_path.as_ref());
+    let mut config =
+        Config::setup_from(path.to_str().ok_or_else(|| {
+            anyhow!("mihoro config path `{}` is not valid UTF-8", path.display())
+        })?)?;
+    config.scheduler.backend = backend;
+    if on_calendar.is_some() {
+        config.scheduler.on_calendar = on_calendar;
+    }
+    if randomized_delay_sec.is_some() {
+        config.scheduler.randomized_delay_sec = randomized_delay_sec;
+    }
+    config.write(path)
+}
+
+fn write_managed_timer_unit(path: &Path, content: &str) -> Result<()> {
+    if let Ok(existing) = fs::read_to_string(path) {
+        if !managed_unit_content(&existing) {
+            anyhow::bail!(
+                "refusing to overwrite unmanaged timer unit `{}`",
+                path.display()
+            );
+        }
+        if existing == content {
+            return Ok(());
+        }
+    }
+    create_parent_dir(path)?;
+    fs::write(path, content)
+        .with_context(|| format!("failed to write timer unit `{}`", path.display()))
+}
+
+fn remove_managed_timer_unit(path: &Path) -> Result<()> {
+    let Ok(existing) = fs::read_to_string(path) else {
+        return Ok(());
+    };
+    if !managed_unit_content(&existing) {
+        anyhow::bail!(
+            "refusing to remove unmanaged timer unit `{}`",
+            path.display()
+        );
+    }
+    fs::remove_file(path)
+        .with_context(|| format!("failed to remove timer unit `{}`", path.display()))
+}
+
+fn import_mihoro_config(
+    config_path: &str,
+    from_mihoro: &str,
+    dry_run: bool,
+    cleanup: bool,
+) -> Result<()> {
+    let legacy_config_path = tilde(from_mihoro);
+    let legacy_config = Config::setup_from(legacy_config_path.as_ref()).with_context(|| {
+        format!(
+            "failed to read source Mihoro config `{}`",
+            legacy_config_path
+        )
+    })?;
+    let legacy_runtime_config =
+        Path::new(tilde(&legacy_config.mihomo_config_root).as_ref()).join("config.yaml");
+    if !legacy_runtime_config.exists() {
+        anyhow::bail!(
+            "source Mihoro runtime config `{}` does not exist",
+            legacy_runtime_config.display()
+        );
+    }
+
+    let expanded_config_path = tilde(config_path);
+    let config_path = Path::new(expanded_config_path.as_ref());
+    let mut config = Config::setup_from(config_path.to_str().ok_or_else(|| {
+        anyhow!(
+            "mihoro config path `{}` is not valid UTF-8",
+            config_path.display()
+        )
+    })?)?;
+
+    let imported_profile = "imported-mihoro";
+    let store = ConfigGenerationStore::new_for_profile(
+        Path::new(tilde(&config.profile_state_root).as_ref())
+            .join("profiles")
+            .join(imported_profile),
+        Path::new(tilde(&config.mihomo_config_root).as_ref()).join("config.yaml"),
+    );
+
+    println!(
+        "{} Import Mihoro config: {} -> {}",
+        DETAIL_PREFIX.cyan(),
+        legacy_runtime_config.display(),
+        store.paths.source_yaml.display()
+    );
+    if dry_run {
+        println!(
+            "{} Dry run succeeded; import did not write files",
+            "->".dimmed()
+        );
+        return Ok(());
+    }
+
+    create_private_parent_dir(&store.paths.source_yaml)?;
+    fs::copy(&legacy_runtime_config, &store.paths.source_yaml).with_context(|| {
+        format!(
+            "failed to copy `{}` to `{}`",
+            legacy_runtime_config.display(),
+            store.paths.source_yaml.display()
+        )
+    })?;
+    fs::copy(&store.paths.source_yaml, &store.paths.active_yaml).with_context(|| {
+        format!(
+            "failed to copy `{}` to `{}`",
+            store.paths.source_yaml.display(),
+            store.paths.active_yaml.display()
+        )
+    })?;
+
+    config.profiles.insert(
+        imported_profile.to_string(),
+        ProfileConfig {
+            source: ProfileSource::Existing {
+                path: store.paths.source_yaml.to_string_lossy().to_string(),
+            },
+            user_agent: None,
+        },
+    );
+    if config.active_profile.is_empty() {
+        config.active_profile = imported_profile.to_string();
+    }
+    config.write(config_path)?;
+
+    if cleanup {
+        cleanup_legacy_deployment_entry(&legacy_config)?;
+    }
+
+    println!(
+        "{} Imported legacy Mihoro runtime config as profile `{}`",
+        "->".green(),
+        imported_profile
+    );
+    Ok(())
+}
+
+fn prepare_target_deployment_runtime(
+    config: &Config,
+    target_backend: DeploymentBackend,
+) -> Result<()> {
+    let source_paths = DeploymentPaths::from_config(config);
+    let mut target_config = config.clone();
+    target_config.deployment.backend = target_backend;
+    let target_paths = DeploymentPaths::from_config(&target_config);
+
+    let source_config_path = Path::new(&source_paths.config_root).join("config.yaml");
+    if !source_config_path.exists() {
+        return Ok(());
+    }
+    let target_config_path = Path::new(&target_paths.config_root).join("config.yaml");
+    if source_config_path == target_config_path {
+        return Ok(());
+    }
+    create_private_parent_dir(&target_config_path)?;
+    fs::copy(&source_config_path, &target_config_path).with_context(|| {
+        format!(
+            "failed to copy active config `{}` to target backend `{}`",
+            source_config_path.display(),
+            target_config_path.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn cleanup_user_backend_after_system_migration(config: &Config) -> Result<()> {
+    let user_config = {
+        let mut config = config.clone();
+        config.deployment.backend = DeploymentBackend::SystemdUser;
+        config
+    };
+    let user_paths = DeploymentPaths::from_config(&user_config);
+    let service_path = Path::new(&user_paths.service_path);
+    let Ok(existing) = fs::read_to_string(service_path) else {
+        return Ok(());
+    };
+    if !existing
+        .lines()
+        .any(|line| line.trim() == crate::deployment::MIHOTO_MANAGED_MARKER)
+    {
+        return Ok(());
+    }
+    fs::remove_file(service_path).with_context(|| {
+        format!(
+            "failed to remove migrated user service `{}`",
+            service_path.display()
+        )
+    })
+}
+
+fn cleanup_legacy_deployment_entry(legacy_config: &Config) -> Result<()> {
+    let service_path =
+        Path::new(tilde(&legacy_config.user_systemd_root).as_ref()).join("mihomo.service");
+    let Ok(existing) = fs::read_to_string(&service_path) else {
+        return Ok(());
+    };
+    let legacy_exec_start = format!(
+        "ExecStart={} -d {}",
+        tilde(&legacy_config.mihomo_binary_path),
+        tilde(&legacy_config.mihomo_config_root)
+    );
+    let is_mihoto_or_legacy_mihoro_unit = existing
+        .lines()
+        .any(|line| line.trim() == crate::deployment::MIHOTO_MANAGED_MARKER)
+        || (existing.contains("Description=Mihomo daemon")
+            && existing.contains(&legacy_exec_start));
+    if !is_mihoto_or_legacy_mihoro_unit {
+        anyhow::bail!(
+            "refusing to cleanup unmanaged legacy service `{}`",
+            service_path.display()
+        );
+    }
+    fs::remove_file(&service_path).with_context(|| {
+        format!(
+            "failed to remove legacy service `{}`",
+            service_path.display()
+        )
+    })
+}
+
+fn run_shell_command(label: &str, command: &str) -> Result<()> {
+    let status = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .status()
+        .with_context(|| format!("failed to {label}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(anyhow!("failed to {label}: command exited with {status}"))
+    }
+}
+
+fn unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 fn installed_mihomo_version(binary_path: &str) -> Result<Option<String>> {
@@ -1015,25 +1537,12 @@ fn candidate_validation_args(config_root: &str, candidate_path: &str) -> Vec<Str
 /// Render the systemd unit file content for mihomo.service.
 ///
 /// Reference: https://wiki.metacubex.one/startup/service/
-fn render_service_string(binary_path: &str, config_root: &str) -> String {
-    format!(
-        "[Unit]
-Description=mihomo Daemon, Another Clash Kernel.
-After=network.target NetworkManager.service systemd-networkd.service iwd.service
-
-[Service]
-Type=simple
-LimitNPROC=4096
-LimitNOFILE=65536
-Restart=always
-ExecStartPre=/usr/bin/sleep 1s
-ExecStart={} -d {}
-ExecReload=/bin/kill -HUP $MAINPID
-
-[Install]
-WantedBy=default.target",
-        binary_path, config_root
-    )
+fn render_service_string(binary_path: &str, config_root: &str, scope: ServiceScope) -> String {
+    render_mihomo_service_unit(&ServiceUnitSpec {
+        scope,
+        binary_path,
+        config_root,
+    })
 }
 
 #[cfg(test)]
@@ -1095,6 +1604,19 @@ mod tests {
         assert_eq!(
             mihoro.systemd_scope(),
             crate::systemctl::SystemdScope::System
+        );
+    }
+
+    #[test]
+    fn system_deployment_service_args_do_not_use_user_scope() {
+        let mut config = Config::new();
+        config.remote_config_url = "https://example.com/sub.yaml".to_string();
+        config.deployment.backend = crate::config::DeploymentBackend::SystemdSystem;
+        let mihoro = Mihoro::from_config(config);
+
+        assert_eq!(
+            mihoro.service_systemctl_args(crate::systemctl::SystemdAction::Restart),
+            vec!["restart", "mihomo.service"]
         );
     }
 
@@ -1212,6 +1734,49 @@ mod tests {
                 "/tmp/mihomo/candidate.yaml".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn render_service_string_uses_mihoto_managed_unit_format() {
+        let unit = render_service_string(
+            "/usr/local/libexec/mihoto/mihomo",
+            "/etc/mihoto",
+            ServiceScope::System,
+        );
+
+        assert!(unit.contains("# X-Mihoto-Managed: true"));
+        assert!(unit.contains("# X-Mihoto-ConfigRoot: /etc/mihoto"));
+        assert!(unit.contains("ExecStart=/usr/local/libexec/mihoto/mihomo -d /etc/mihoto"));
+    }
+
+    #[tokio::test]
+    async fn ensure_service_refuses_unmanaged_existing_unit() -> Result<()> {
+        let dir = tempdir()?;
+        let systemd_root = dir.path().join("systemd");
+        fs::create_dir_all(&systemd_root)?;
+        fs::write(
+            systemd_root.join("mihomo.service"),
+            "[Unit]\nDescription=hand written mihomo\n",
+        )?;
+
+        let mut config = Config::new();
+        config.remote_config_url = "https://example.com/sub.yaml".to_string();
+        config.mihomo_binary_path = dir.path().join("mihomo").to_string_lossy().to_string();
+        config.mihomo_config_root = dir.path().join("runtime").to_string_lossy().to_string();
+        config.user_systemd_root = systemd_root.to_string_lossy().to_string();
+        let mihoro = Mihoro::from_config(config);
+
+        let err = match mihoro.ensure_service().await {
+            Ok(_) => panic!("unmanaged unit must be refused before systemctl reload"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains("unmanaged mihomo.service"));
+        assert_eq!(
+            fs::read_to_string(systemd_root.join("mihomo.service"))?,
+            "[Unit]\nDescription=hand written mihomo\n"
+        );
+        Ok(())
     }
 
     /// Test integration: download config → apply override → verify result
@@ -1438,6 +2003,222 @@ mod tests {
             "port: 8080\nsocks-port: 8081\nproxies: []\n"
         );
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn deploy_apply_dry_run_does_not_modify_config_file() -> Result<()> {
+        let dir = tempdir()?;
+        let config_path = dir.path().join("mihoro.toml");
+        let mut config = Config::new();
+        config.remote_config_url = "https://example.com/sub.yaml".to_string();
+        config.profile_state_root = dir.path().join("state").to_string_lossy().to_string();
+        config.write(&config_path)?;
+        let before = fs::read_to_string(&config_path)?;
+        let mihoro = Mihoro::from_config(config);
+
+        mihoro
+            .deploy_commands(
+                config_path.to_str().unwrap(),
+                &Some(DeployCommands::Apply {
+                    backend: crate::cmd::DeploymentBackendArg::SystemdSystem,
+                    dry_run: true,
+                    adopt_existing_unit: false,
+                }),
+            )
+            .await?;
+
+        assert_eq!(fs::read_to_string(&config_path)?, before);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn deploy_import_dry_run_preserves_current_and_source_files() -> Result<()> {
+        let dir = tempdir()?;
+        let current_config_path = dir.path().join("current.toml");
+        let legacy_config_path = dir.path().join("legacy.toml");
+        let legacy_runtime_root = dir.path().join("legacy-runtime");
+        fs::create_dir_all(&legacy_runtime_root)?;
+        fs::write(
+            legacy_runtime_root.join("config.yaml"),
+            "port: 8080\nsocks-port: 8081\nproxies: []\n",
+        )?;
+
+        let mut current_config = Config::new();
+        current_config.remote_config_url = "https://example.com/current.yaml".to_string();
+        current_config.profile_state_root = dir.path().join("state").to_string_lossy().to_string();
+        current_config.write(&current_config_path)?;
+
+        let mut legacy_config = Config::new();
+        legacy_config.remote_config_url = "https://example.com/legacy.yaml".to_string();
+        legacy_config.mihomo_config_root = legacy_runtime_root.to_string_lossy().to_string();
+        legacy_config.write(&legacy_config_path)?;
+
+        let before_current = fs::read_to_string(&current_config_path)?;
+        let before_legacy = fs::read_to_string(legacy_runtime_root.join("config.yaml"))?;
+        let mihoro = Mihoro::from_config(current_config);
+
+        mihoro
+            .deploy_commands(
+                current_config_path.to_str().unwrap(),
+                &Some(DeployCommands::Import {
+                    from_mihoro: legacy_config_path.to_string_lossy().to_string(),
+                    dry_run: true,
+                    cleanup: false,
+                }),
+            )
+            .await?;
+
+        assert_eq!(fs::read_to_string(&current_config_path)?, before_current);
+        assert_eq!(
+            fs::read_to_string(legacy_runtime_root.join("config.yaml"))?,
+            before_legacy
+        );
+        assert!(!dir
+            .path()
+            .join("state/profiles/imported-mihoro/source.yaml")
+            .exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn deploy_import_copies_legacy_runtime_config_into_profile() -> Result<()> {
+        let dir = tempdir()?;
+        let current_config_path = dir.path().join("current.toml");
+        let legacy_config_path = dir.path().join("legacy.toml");
+        let legacy_runtime_root = dir.path().join("legacy-runtime");
+        fs::create_dir_all(&legacy_runtime_root)?;
+        let legacy_yaml = "port: 8080\nsocks-port: 8081\nproxies: []\n";
+        fs::write(legacy_runtime_root.join("config.yaml"), legacy_yaml)?;
+
+        let mut current_config = Config::new();
+        current_config.remote_config_url = "https://example.com/current.yaml".to_string();
+        current_config.profile_state_root = dir.path().join("state").to_string_lossy().to_string();
+        current_config.write(&current_config_path)?;
+
+        let mut legacy_config = Config::new();
+        legacy_config.remote_config_url = "https://example.com/legacy.yaml".to_string();
+        legacy_config.mihomo_config_root = legacy_runtime_root.to_string_lossy().to_string();
+        legacy_config.write(&legacy_config_path)?;
+
+        let mihoro = Mihoro::from_config(current_config);
+        mihoro
+            .deploy_commands(
+                current_config_path.to_str().unwrap(),
+                &Some(DeployCommands::Import {
+                    from_mihoro: legacy_config_path.to_string_lossy().to_string(),
+                    dry_run: false,
+                    cleanup: false,
+                }),
+            )
+            .await?;
+
+        let imported_root = dir.path().join("state/profiles/imported-mihoro");
+        assert_eq!(
+            fs::read_to_string(imported_root.join("source.yaml"))?,
+            legacy_yaml
+        );
+        assert_eq!(
+            fs::read_to_string(imported_root.join("active.yaml"))?,
+            legacy_yaml
+        );
+        assert_eq!(
+            fs::read_to_string(legacy_runtime_root.join("config.yaml"))?,
+            legacy_yaml
+        );
+        let imported_config = Config::setup_from(current_config_path.to_str().unwrap())?;
+        assert!(matches!(
+            imported_config
+                .profiles
+                .get("imported-mihoro")
+                .map(|profile| &profile.source),
+            Some(ProfileSource::Existing { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn write_scheduler_config_persists_backend_and_timer_options() -> Result<()> {
+        let dir = tempdir()?;
+        let config_path = dir.path().join("mihoro.toml");
+        let mut config = Config::new();
+        config.remote_config_url = "https://example.com/sub.yaml".to_string();
+        config.write(&config_path)?;
+
+        write_scheduler_config(
+            config_path.to_str().unwrap(),
+            SchedulerBackend::Cron,
+            Some("hourly".to_string()),
+            Some("5min".to_string()),
+        )?;
+
+        let config = Config::setup_from(config_path.to_str().unwrap())?;
+        assert_eq!(config.scheduler.backend, SchedulerBackend::Cron);
+        assert_eq!(config.scheduler.on_calendar.as_deref(), Some("hourly"));
+        assert_eq!(
+            config.scheduler.randomized_delay_sec.as_deref(),
+            Some("5min")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn write_managed_timer_unit_refuses_unmanaged_existing_unit() -> Result<()> {
+        let dir = tempdir()?;
+        let unit = dir.path().join("mihoto-update.timer");
+        fs::write(&unit, "[Timer]\nOnCalendar=daily\n")?;
+
+        let err = write_managed_timer_unit(&unit, "# X-Mihoto-Managed: true\n")
+            .expect_err("unmanaged timer unit must be refused");
+
+        assert!(err.to_string().contains("unmanaged timer unit"));
+        assert_eq!(fs::read_to_string(unit)?, "[Timer]\nOnCalendar=daily\n");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn deploy_migrate_records_rollback_and_rollback_restores_backend() -> Result<()> {
+        let dir = tempdir()?;
+        let config_path = dir.path().join("mihoro.toml");
+        let mut config = Config::new();
+        config.remote_config_url = "https://example.com/sub.yaml".to_string();
+        config.profile_state_root = dir.path().join("state").to_string_lossy().to_string();
+        config.deployment.backend = crate::config::DeploymentBackend::SystemdSystem;
+        config.write(&config_path)?;
+        let mihoro = Mihoro::from_config(config);
+
+        mihoro
+            .deploy_commands(
+                config_path.to_str().unwrap(),
+                &Some(DeployCommands::Migrate {
+                    to: crate::cmd::DeploymentBackendArg::SystemdUser,
+                    dry_run: false,
+                    adopt_existing_unit: false,
+                }),
+            )
+            .await?;
+
+        let migrated = Config::setup_from(config_path.to_str().unwrap())?;
+        assert_eq!(
+            migrated.deployment.backend,
+            crate::config::DeploymentBackend::SystemdUser
+        );
+        let records_dir = dir.path().join("state/deployments");
+        assert_eq!(fs::read_dir(&records_dir)?.count(), 1);
+
+        let mihoro = Mihoro::from_config(migrated);
+        mihoro
+            .deploy_commands(
+                config_path.to_str().unwrap(),
+                &Some(DeployCommands::Rollback { id: None }),
+            )
+            .await?;
+
+        let rolled_back = Config::setup_from(config_path.to_str().unwrap())?;
+        assert_eq!(
+            rolled_back.deployment.backend,
+            crate::config::DeploymentBackend::SystemdSystem
+        );
         Ok(())
     }
 }

@@ -21,7 +21,7 @@ pub enum MihomoChannel {
 }
 
 /// Persisted service deployment backend.
-#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum DeploymentBackend {
     #[default]
@@ -44,7 +44,7 @@ impl Default for DeploymentConfig {
 }
 
 /// Persisted scheduled update backend.
-#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum SchedulerBackend {
     #[default]
