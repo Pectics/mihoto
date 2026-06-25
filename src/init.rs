@@ -1,4 +1,6 @@
-use crate::config::{load_config, validate_config, write_default_if_missing, Config};
+use crate::config::{
+    load_config, validate_config, write_default_if_missing, Config, DeploymentBackend,
+};
 use crate::mihoro::{BinaryPlan, Mihoro, StageStatus};
 
 use std::{collections::HashSet, future::Future, net::IpAddr, path::Path};
@@ -14,6 +16,7 @@ pub struct InitOptions {
     pub force: bool,
     pub arch: Option<String>,
     pub yes: bool,
+    pub backend: Option<DeploymentBackend>,
 }
 
 // ---------------------------------------------------------------------------
@@ -262,7 +265,11 @@ fn prompt_subscription_url() -> Result<String> {
     Ok(url.trim().to_string())
 }
 
-fn bootstrap_config(config_path: &str, yes: bool) -> Result<Config> {
+fn bootstrap_config(
+    config_path: &str,
+    yes: bool,
+    backend: Option<DeploymentBackend>,
+) -> Result<Config> {
     let just_created = write_default_if_missing(config_path)?;
 
     // After write_default_if_missing the file always exists.
@@ -289,6 +296,10 @@ fn bootstrap_config(config_path: &str, yes: bool) -> Result<Config> {
         config.write(Path::new(config_path))?;
         println!("{} Saved", "mihoro:".green());
     }
+    if let Some(backend) = backend {
+        config.deployment.backend = backend;
+        config.write(Path::new(config_path))?;
+    }
 
     Ok(config)
 }
@@ -300,7 +311,7 @@ fn bootstrap_config(config_path: &str, yes: bool) -> Result<Config> {
 pub async fn run(config_path: &str, client: &Client, opts: InitOptions) -> Result<()> {
     let config_path = tilde(config_path);
     let config_path = config_path.as_ref();
-    let config = bootstrap_config(config_path, opts.yes)?;
+    let config = bootstrap_config(config_path, opts.yes, opts.backend)?;
     validate_config(&config)?;
 
     let mihoro = Mihoro::from_config(config.clone());

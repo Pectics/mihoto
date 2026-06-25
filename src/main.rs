@@ -23,9 +23,9 @@ use colored::Colorize;
 use reqwest::Client;
 use std::{future::Future, io, process::Command, time::Duration};
 
-use cmd::{Args, ClapShell, Commands};
+use cmd::{Args, ClapShell, Commands, DeploymentBackendArg};
 use mihoro::{Mihoro, StageStatus};
-use systemctl::Systemctl;
+use systemctl::{journalctl_args, Systemctl};
 
 struct StageReport {
     entries: Vec<(&'static str, StageStatus)>,
@@ -109,7 +109,12 @@ async fn cli() -> Result<()> {
 
     // Handle Init and Setup before constructing Mihoro, which requires a valid config.
     match &args.command {
-        Some(Commands::Init { force, arch, yes }) => {
+        Some(Commands::Init {
+            force,
+            arch,
+            yes,
+            backend,
+        }) => {
             return init::run(
                 &args.mihoro_config,
                 &client,
@@ -117,6 +122,7 @@ async fn cli() -> Result<()> {
                     force: *force,
                     arch: arch.clone(),
                     yes: *yes,
+                    backend: backend.map(deployment_backend_from_arg),
                 },
             )
             .await;
@@ -133,6 +139,7 @@ async fn cli() -> Result<()> {
                     force: *overwrite,
                     arch: arch.clone(),
                     yes: true,
+                    backend: None,
                 },
             )
             .await;
@@ -281,10 +288,16 @@ async fn cli() -> Result<()> {
         Some(Commands::Profile { profile }) => {
             mihoro.profile_commands(&args.mihoro_config, profile)?;
         }
+        Some(Commands::Deploy { deploy }) => {
+            mihoro.deploy_commands(&args.mihoro_config, deploy).await?;
+        }
+        Some(Commands::Schedule { schedule }) => {
+            mihoro.schedule_commands(schedule)?;
+        }
         Some(Commands::Uninstall) => mihoro.uninstall()?,
         Some(Commands::Proxy { proxy }) => mihoro.proxy_commands(proxy)?,
 
-        Some(Commands::Start) => Systemctl::new()
+        Some(Commands::Start) => Systemctl::with_scope(mihoro.systemd_scope())
             .start("mihomo.service")
             .execute()
             .map(|_| {
@@ -292,30 +305,33 @@ async fn cli() -> Result<()> {
             })?,
 
         Some(Commands::Status) => {
-            Systemctl::new().status("mihomo.service").execute()?;
+            Systemctl::with_scope(mihoro.systemd_scope())
+                .status("mihomo.service")
+                .execute()?;
         }
 
-        Some(Commands::Stop) => Systemctl::new().stop("mihomo.service").execute().map(|_| {
-            println!("{} Stopped mihomo.service", mihoro.prefix.green());
-        })?,
+        Some(Commands::Stop) => Systemctl::with_scope(mihoro.systemd_scope())
+            .stop("mihomo.service")
+            .execute()
+            .map(|_| {
+                println!("{} Stopped mihomo.service", mihoro.prefix.green());
+            })?,
 
-        Some(Commands::Restart) => {
-            Systemctl::new()
-                .restart("mihomo.service")
-                .execute()
-                .map(|_| {
-                    println!("{} Restarted mihomo.service", mihoro.prefix.green());
-                })?
-        }
+        Some(Commands::Restart) => Systemctl::with_scope(mihoro.systemd_scope())
+            .restart("mihomo.service")
+            .execute()
+            .map(|_| {
+                println!("{} Restarted mihomo.service", mihoro.prefix.green());
+            })?,
 
         Some(Commands::Log) => {
             Command::new("journalctl")
-                .arg("--user")
-                .arg("-xeu")
-                .arg("mihomo.service")
-                .arg("-n")
-                .arg("10")
-                .arg("-f")
+                .args(journalctl_args(
+                    mihoro.systemd_scope(),
+                    "mihomo.service",
+                    10,
+                    true,
+                ))
                 .spawn()
                 .expect("failed to execute process")
                 .wait()?;
@@ -374,4 +390,11 @@ async fn cli() -> Result<()> {
         None => (),
     }
     Ok(())
+}
+
+fn deployment_backend_from_arg(arg: DeploymentBackendArg) -> config::DeploymentBackend {
+    match arg {
+        DeploymentBackendArg::SystemdUser => config::DeploymentBackend::SystemdUser,
+        DeploymentBackendArg::SystemdSystem => config::DeploymentBackend::SystemdSystem,
+    }
 }

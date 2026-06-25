@@ -1,11 +1,11 @@
-use crate::cmd::{CronCommands, ProfileCommands, ProxyCommands};
-use crate::config::{parse_config, Config, ProfileConfig, ProfileSource};
+use crate::cmd::{CronCommands, DeployCommands, ProfileCommands, ProxyCommands, ScheduleCommands};
+use crate::config::{parse_config, Config, DeploymentBackend, ProfileConfig, ProfileSource};
 use crate::config_store::ConfigGenerationStore;
 use crate::cron;
 use crate::proxy::{proxy_export_cmd, proxy_unset_cmd};
 use crate::resolve_mihomo_bin;
 use crate::source::fetch_profile_source;
-use crate::systemctl::Systemctl;
+use crate::systemctl::{Systemctl, SystemdScope};
 use crate::ui::{install_ui, resolve_external_ui_path};
 use crate::utils::{
     create_parent_dir, create_private_parent_dir, delete_file, download_file, extract_gzip,
@@ -43,6 +43,37 @@ pub struct Mihoro {
     pub mihomo_target_config_root: String,
     pub mihomo_target_config_path: String,
     pub mihomo_target_service_path: String,
+    systemd_scope: SystemdScope,
+}
+
+struct DeploymentPaths {
+    binary_path: String,
+    config_root: String,
+    service_path: String,
+    scope: SystemdScope,
+}
+
+impl DeploymentPaths {
+    fn from_config(config: &Config) -> Self {
+        match config.deployment.backend {
+            DeploymentBackend::SystemdUser => {
+                let config_root = tilde(&config.mihomo_config_root).to_string();
+                Self {
+                    binary_path: tilde(&config.mihomo_binary_path).to_string(),
+                    config_root,
+                    service_path: tilde(&format!("{}/mihomo.service", config.user_systemd_root))
+                        .to_string(),
+                    scope: SystemdScope::User,
+                }
+            }
+            DeploymentBackend::SystemdSystem => Self {
+                binary_path: "/usr/local/libexec/mihoto/mihomo".to_string(),
+                config_root: "/etc/mihoto".to_string(),
+                service_path: "/etc/systemd/system/mihomo.service".to_string(),
+                scope: SystemdScope::System,
+            },
+        }
+    }
 }
 
 /// Outcome of a single setup stage, used by `mihoro init`.
@@ -73,19 +104,20 @@ impl Mihoro {
 
     /// Build a `Mihoro` from an already-validated `Config`.
     pub fn from_config(config: Config) -> Mihoro {
+        let paths = DeploymentPaths::from_config(&config);
         Mihoro {
             prefix: String::from("mihoro:"),
-            mihomo_target_binary_path: tilde(&config.mihomo_binary_path).to_string(),
-            mihomo_target_config_root: tilde(&config.mihomo_config_root).to_string(),
-            mihomo_target_config_path: tilde(&format!("{}/config.yaml", config.mihomo_config_root))
-                .to_string(),
-            mihomo_target_service_path: tilde(&format!(
-                "{}/mihomo.service",
-                config.user_systemd_root
-            ))
-            .to_string(),
             config,
+            mihomo_target_binary_path: paths.binary_path,
+            mihomo_target_config_root: paths.config_root.clone(),
+            mihomo_target_config_path: format!("{}/config.yaml", paths.config_root),
+            mihomo_target_service_path: paths.service_path,
+            systemd_scope: paths.scope,
         }
+    }
+
+    pub fn systemd_scope(&self) -> SystemdScope {
+        self.systemd_scope
     }
 
     fn config_generation_store(&self) -> ConfigGenerationStore {
@@ -814,6 +846,52 @@ impl Mihoro {
         Ok(())
     }
 
+    pub async fn deploy_commands(
+        &self,
+        _config_path: &str,
+        command: &Option<DeployCommands>,
+    ) -> Result<()> {
+        match command {
+            Some(DeployCommands::Status) => {
+                println!(
+                    "{} Deployment backend: {:?}",
+                    self.prefix.green(),
+                    self.config.deployment.backend
+                );
+                println!(
+                    "{} Service: {}",
+                    "->".dimmed(),
+                    self.mihomo_target_service_path
+                );
+            }
+            Some(DeployCommands::Apply { .. })
+            | Some(DeployCommands::Import { .. })
+            | Some(DeployCommands::Migrate { .. })
+            | Some(DeployCommands::Rollback { .. }) => {
+                anyhow::bail!("deploy command is not implemented yet")
+            }
+            None => {}
+        }
+        Ok(())
+    }
+
+    pub fn schedule_commands(&self, command: &Option<ScheduleCommands>) -> Result<()> {
+        match command {
+            Some(ScheduleCommands::Status) => {
+                println!(
+                    "{} Scheduler backend: {:?}",
+                    self.prefix.green(),
+                    self.config.scheduler.backend
+                );
+            }
+            Some(ScheduleCommands::Enable { .. }) | Some(ScheduleCommands::Disable) => {
+                anyhow::bail!("schedule command is not implemented yet")
+            }
+            None => {}
+        }
+        Ok(())
+    }
+
     pub fn cron_commands(&self, command: &Option<CronCommands>) -> Result<()> {
         match command {
             Some(CronCommands::Enable) => {
@@ -994,6 +1072,30 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn system_deployment_derives_fixed_system_paths() {
+        let mut config = Config::new();
+        config.remote_config_url = "https://example.com/sub.yaml".to_string();
+        config.deployment.backend = crate::config::DeploymentBackend::SystemdSystem;
+
+        let mihoro = Mihoro::from_config(config);
+
+        assert_eq!(
+            mihoro.mihomo_target_binary_path,
+            "/usr/local/libexec/mihoto/mihomo"
+        );
+        assert_eq!(mihoro.mihomo_target_config_root, "/etc/mihoto");
+        assert_eq!(mihoro.mihomo_target_config_path, "/etc/mihoto/config.yaml");
+        assert_eq!(
+            mihoro.mihomo_target_service_path,
+            "/etc/systemd/system/mihomo.service"
+        );
+        assert_eq!(
+            mihoro.systemd_scope(),
+            crate::systemctl::SystemdScope::System
+        );
     }
 
     /// Test that proxy_commands uses mixed_port when set
