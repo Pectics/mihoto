@@ -26,10 +26,6 @@ pub struct Systemctl {
 }
 
 impl Systemctl {
-    pub fn new() -> Self {
-        Self::with_scope(SystemdScope::User)
-    }
-
     pub fn with_scope(scope: SystemdScope) -> Self {
         Self {
             systemctl: Command::new("systemctl"),
@@ -90,10 +86,12 @@ impl Systemctl {
         }
     }
 
-    /// Returns `true` if the given user service is currently active.
-    pub fn is_active(service: &str) -> bool {
-        Command::new("systemctl")
-            .arg("--user")
+    pub fn is_active_scoped(scope: SystemdScope, service: &str) -> bool {
+        let mut command = Command::new("systemctl");
+        if scope == SystemdScope::User {
+            command.arg("--user");
+        }
+        command
             .arg("is-active")
             .arg("--quiet")
             .arg(service)
@@ -102,10 +100,12 @@ impl Systemctl {
             .unwrap_or(false)
     }
 
-    /// Returns `true` if the given user service is enabled for autostart.
-    pub fn is_enabled(service: &str) -> bool {
-        Command::new("systemctl")
-            .arg("--user")
+    pub fn is_enabled_scoped(scope: SystemdScope, service: &str) -> bool {
+        let mut command = Command::new("systemctl");
+        if scope == SystemdScope::User {
+            command.arg("--user");
+        }
+        command
             .arg("is-enabled")
             .arg("--quiet")
             .arg(service)
