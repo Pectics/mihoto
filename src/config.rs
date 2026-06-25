@@ -20,6 +20,60 @@ pub enum MihomoChannel {
     Alpha,
 }
 
+/// Persisted service deployment backend.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum DeploymentBackend {
+    #[default]
+    SystemdUser,
+    SystemdSystem,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(default)]
+pub struct DeploymentConfig {
+    pub backend: DeploymentBackend,
+}
+
+impl Default for DeploymentConfig {
+    fn default() -> Self {
+        Self {
+            backend: DeploymentBackend::SystemdUser,
+        }
+    }
+}
+
+/// Persisted scheduled update backend.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SchedulerBackend {
+    #[default]
+    SystemdTimer,
+    Cron,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(default)]
+pub struct SchedulerConfig {
+    pub backend: SchedulerBackend,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_calendar: Option<String>,
+    pub persistent: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub randomized_delay_sec: Option<String>,
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            backend: SchedulerBackend::SystemdTimer,
+            on_calendar: Some("0/12:00:00".to_string()),
+            persistent: true,
+            randomized_delay_sec: Some("15min".to_string()),
+        }
+    }
+}
+
 /// `mihoro` configurations.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(default)]
@@ -41,6 +95,8 @@ pub struct Config {
     pub mihomo_binary_path: String,
     pub mihomo_config_root: String,
     pub user_systemd_root: String,
+    pub deployment: DeploymentConfig,
+    pub scheduler: SchedulerConfig,
     pub mihoro_user_agent: String,
     pub auto_update_interval: u16,
     pub mihomo_config: MihomoConfig,
@@ -63,6 +119,8 @@ impl Default for Config {
             mihomo_binary_path: String::from("~/.local/bin/mihomo"),
             mihomo_config_root: String::from("~/.config/mihomo"),
             user_systemd_root: String::from("~/.config/systemd/user"),
+            deployment: DeploymentConfig::default(),
+            scheduler: SchedulerConfig::default(),
             mihoro_user_agent: String::from("mihoro"),
             auto_update_interval: 12,
             mihomo_config: MihomoConfig::default(),
@@ -753,5 +811,53 @@ secret: !delete
                 url: "https://example.com/sub.yaml".to_string()
             }
         );
+    }
+
+    #[test]
+    fn config_defaults_to_user_deployment_and_systemd_timer_scheduler() {
+        let config = Config::new();
+
+        assert_eq!(config.deployment.backend, DeploymentBackend::SystemdUser);
+        assert_eq!(config.scheduler.backend, SchedulerBackend::SystemdTimer);
+        assert!(config.scheduler.persistent);
+        assert_eq!(config.scheduler.on_calendar.as_deref(), Some("0/12:00:00"));
+        assert_eq!(
+            config.scheduler.randomized_delay_sec.as_deref(),
+            Some("15min")
+        );
+    }
+
+    #[test]
+    fn config_parses_system_deployment_and_cron_scheduler() -> Result<()> {
+        let raw = r#"
+            remote_config_url = "https://example.com/sub.yaml"
+            mihomo_binary_path = "~/.local/bin/mihomo"
+            mihomo_config_root = "~/.config/mihomo"
+            user_systemd_root = "~/.config/systemd/user"
+
+            [deployment]
+            backend = "systemd-system"
+
+            [scheduler]
+            backend = "cron"
+            on_calendar = "*-*-* 03:00:00"
+            persistent = false
+            randomized_delay_sec = "5min"
+        "#;
+
+        let config: Config = toml::from_str(raw)?;
+
+        assert_eq!(config.deployment.backend, DeploymentBackend::SystemdSystem);
+        assert_eq!(config.scheduler.backend, SchedulerBackend::Cron);
+        assert_eq!(
+            config.scheduler.on_calendar.as_deref(),
+            Some("*-*-* 03:00:00")
+        );
+        assert!(!config.scheduler.persistent);
+        assert_eq!(
+            config.scheduler.randomized_delay_sec.as_deref(),
+            Some("5min")
+        );
+        Ok(())
     }
 }

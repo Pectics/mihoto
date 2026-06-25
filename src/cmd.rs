@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(author, about, version, arg_required_else_help(true))]
@@ -31,6 +31,10 @@ pub enum Commands {
         /// ppc64le, riscv64, s390x
         #[arg(long)]
         arch: Option<String>,
+
+        /// Persisted deployment backend to write before initialization
+        #[arg(long)]
+        backend: Option<DeploymentBackendArg>,
     },
     /// Deprecated: use `mihoro init` instead
     #[command(hide = true)]
@@ -98,6 +102,16 @@ pub enum Commands {
         #[clap(subcommand)]
         profile: Option<ProfileCommands>,
     },
+    /// Manage service deployment backend
+    Deploy {
+        #[clap(subcommand)]
+        deploy: Option<DeployCommands>,
+    },
+    /// Manage scheduled updates
+    Schedule {
+        #[clap(subcommand)]
+        schedule: Option<ScheduleCommands>,
+    },
     /// Start mihomo.service with systemctl
     Start,
     /// Check mihomo.service status with systemctl
@@ -141,6 +155,98 @@ pub enum Commands {
         #[arg(long)]
         target: Option<String>,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub enum DeploymentBackendArg {
+    SystemdUser,
+    SystemdSystem,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub enum SchedulerBackendArg {
+    SystemdTimer,
+    Cron,
+}
+
+#[derive(Subcommand)]
+#[command(arg_required_else_help(true))]
+pub enum DeployCommands {
+    /// Print current deployment backend and derived paths
+    Status,
+    /// Apply a deployment backend
+    Apply {
+        /// Backend to apply
+        #[arg(long)]
+        backend: DeploymentBackendArg,
+
+        /// Print the plan without mutating files or services
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Adopt and back up an existing unmanaged mihomo.service
+        #[arg(long)]
+        adopt_existing_unit: bool,
+    },
+    /// Import an existing Mihoro configuration tree
+    Import {
+        /// Source Mihoro config path
+        #[arg(long = "from-mihoro")]
+        from_mihoro: String,
+
+        /// Print the plan without mutating files or services
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Remove imported source files after a successful import
+        #[arg(long)]
+        cleanup: bool,
+    },
+    /// Migrate the active deployment backend
+    Migrate {
+        /// Target backend
+        #[arg(long)]
+        to: DeploymentBackendArg,
+
+        /// Print the plan without mutating files or services
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Adopt and back up an existing unmanaged mihomo.service
+        #[arg(long)]
+        adopt_existing_unit: bool,
+    },
+    /// Roll back the last deployment migration
+    Rollback {
+        /// Migration id to roll back; defaults to latest
+        #[arg(long)]
+        id: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+#[command(arg_required_else_help(true))]
+pub enum ScheduleCommands {
+    /// Enable scheduled updates
+    Enable {
+        /// Scheduler backend
+        #[arg(long)]
+        backend: Option<SchedulerBackendArg>,
+
+        /// systemd OnCalendar expression
+        #[arg(long)]
+        on_calendar: Option<String>,
+
+        /// systemd RandomizedDelaySec value
+        #[arg(long)]
+        randomized_delay_sec: Option<String>,
+    },
+    /// Disable scheduled updates
+    Disable,
+    /// Show scheduled update status
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -254,6 +360,84 @@ mod tests {
                 assert!(!all);
             }
             _ => panic!("expected update command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_init_backend_flag() {
+        let args = Args::parse_from(["mihoro", "init", "--backend", "systemd-system"]);
+        match args.command {
+            Some(Commands::Init { backend, .. }) => {
+                assert_eq!(backend, Some(DeploymentBackendArg::SystemdSystem));
+            }
+            _ => panic!("expected init command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_deploy_apply_and_migrate_commands() {
+        let args = Args::parse_from([
+            "mihoro",
+            "deploy",
+            "apply",
+            "--backend",
+            "systemd-system",
+            "--dry-run",
+            "--adopt-existing-unit",
+        ]);
+        match args.command {
+            Some(Commands::Deploy {
+                deploy:
+                    Some(DeployCommands::Apply {
+                        backend,
+                        dry_run,
+                        adopt_existing_unit,
+                    }),
+            }) => {
+                assert_eq!(backend, DeploymentBackendArg::SystemdSystem);
+                assert!(dry_run);
+                assert!(adopt_existing_unit);
+            }
+            _ => panic!("expected deploy apply command"),
+        }
+
+        let args = Args::parse_from(["mihoro", "deploy", "migrate", "--to", "systemd-system"]);
+        match args.command {
+            Some(Commands::Deploy {
+                deploy: Some(DeployCommands::Migrate { to, .. }),
+            }) => assert_eq!(to, DeploymentBackendArg::SystemdSystem),
+            _ => panic!("expected deploy migrate command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_schedule_enable_command() {
+        let args = Args::parse_from([
+            "mihoro",
+            "schedule",
+            "enable",
+            "--backend",
+            "systemd-timer",
+            "--on-calendar",
+            "*-*-* 03:00:00",
+            "--randomized-delay-sec",
+            "5min",
+        ]);
+
+        match args.command {
+            Some(Commands::Schedule {
+                schedule:
+                    Some(ScheduleCommands::Enable {
+                        backend,
+                        on_calendar,
+                        randomized_delay_sec,
+                    }),
+            }) => {
+                assert_eq!(backend, Some(SchedulerBackendArg::SystemdTimer));
+                assert_eq!(on_calendar.as_deref(), Some("*-*-* 03:00:00"));
+                assert_eq!(randomized_delay_sec.as_deref(), Some("5min"));
+            }
+            _ => panic!("expected schedule enable command"),
         }
     }
 
