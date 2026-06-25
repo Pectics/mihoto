@@ -90,9 +90,18 @@ user_systemd_root = "~/.config/systemd/user"
 mihoro_user_agent = "mihoro"
 auto_update_interval = 12
 
+[deployment]
+backend = "systemd-user"
+
+[scheduler]
+backend = "systemd-timer"
+on_calendar = "0/12:00:00"
+persistent = true
+randomized_delay_sec = "15min"
+
 [profiles.default]
 source = { type = "url", url = "https://example.com/subscription" }
-user_agent = "mihoro/0.2.0 (Clash-compatible)"
+user_agent = "mihoro/0.3.0 (Clash-compatible)"
 
 [mihomo_config]
 port = 7891
@@ -136,7 +145,7 @@ Authenticated subscription headers are stored outside `mihoro.toml` in private p
 
 ```bash
 mihoro profile add work --url https://example.com/subscription \
-  --user-agent "mihoro/0.2.0 (Clash-compatible)" \
+  --user-agent "mihoro/0.3.0 (Clash-compatible)" \
   --header "Authorization=Bearer <token>"
 ```
 
@@ -162,6 +171,13 @@ Use `--arch` if auto-detection picks the wrong mihomo build for your machine:
 
 ```bash
 mihoro init --arch amd64-v3
+```
+
+Use `--backend` to initialize directly into the persisted deployment backend:
+
+```bash
+mihoro init --backend systemd-user
+mihoro init --backend systemd-system
 ```
 
 ## Usage
@@ -201,6 +217,49 @@ mihoro apply --dry-run --diff
 ```
 
 `mihoro apply --dry-run` renders and validates the candidate config without changing the profile active state, `last-good.yaml`, runtime `config.yaml`, or restarting `mihomo.service`. Add `--diff` to print a redacted semantic diff between the active and candidate configs.
+
+## Deployment backends
+
+`[deployment].backend` is the single source of truth for service scope. Mihoro no longer infers the active backend from whichever unit file happens to exist.
+
+Supported backends:
+
+- `systemd-user` keeps the inherited rootless layout: `~/.local/bin/mihomo`, `~/.config/mihomo`, and `~/.config/systemd/user/mihomo.service`.
+- `systemd-system` uses fixed system paths: `/usr/local/libexec/mihoto/mihomo`, `/etc/mihoto`, `/var/lib/mihoto`, `/run/mihoto`, and `/etc/systemd/system/mihomo.service`.
+
+The service name is `mihomo.service` in both scopes. System units run as `mihomo:mihomo` and include Mihoto ownership metadata:
+
+```text
+# X-Mihoto-Managed: true
+# X-Mihoto-Backend: systemd-system
+# X-Mihoto-ConfigRoot: /etc/mihoto
+```
+
+Deployment commands:
+
+```bash
+mihoro deploy status
+mihoro deploy apply --backend systemd-user --dry-run
+mihoro deploy apply --backend systemd-system --adopt-existing-unit
+mihoro deploy import --from-mihoro ~/.config/mihoro.toml --dry-run
+mihoro deploy migrate --to systemd-system --dry-run
+mihoro deploy rollback
+```
+
+Mihoro refuses to overwrite an existing unmanaged `mihomo.service`. Passing `--adopt-existing-unit` backs up the old unit before writing the Mihoto-managed unit. `deploy migrate` records rollback metadata under `profile_state_root/deployments`; `deploy rollback` restores the previous backend from that metadata. `deploy import --cleanup` only removes old deployment entrypoints that Mihoto can recognize as managed or legacy Mihoro units; it does not delete the source config or runtime YAML files.
+
+## Scheduled updates
+
+`mihoro schedule` is the preferred scheduler interface. The legacy `mihoro cron` command remains available for compatibility.
+
+```bash
+mihoro schedule enable --backend systemd-timer --on-calendar "0/12:00:00" --randomized-delay-sec 15min
+mihoro schedule enable --backend cron
+mihoro schedule status
+mihoro schedule disable
+```
+
+The systemd timer backend writes `mihoto-update.service` and `mihoto-update.timer` in the matching user or system systemd scope. Timer logs are available in the corresponding journal. The default timer is persistent and uses `RandomizedDelaySec=15min`.
 
 To update `mihomo` binary (core) and/or geodata:
 
@@ -275,6 +334,9 @@ Commands:
   init         Initialize mihoro: download binary, config, geodata, and set up the systemd service
   update       Update mihomo components (config by default)
   apply        Apply mihomo config overrides and restart mihomo.service
+  profile      Manage named config profiles
+  deploy       Manage service deployment backend
+  schedule     Manage scheduled updates
   start        Start mihomo.service with systemctl
   status       Check mihomo.service status with systemctl
   stop         Stop mihomo.service with systemctl
