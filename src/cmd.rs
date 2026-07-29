@@ -52,12 +52,14 @@ pub enum Commands {
     /// Manage the systemd update timer
     Timer {
         #[command(subcommand)]
-        timer: Option<TimerCommands>,
+        timer: TimerCommands,
     },
     /// Uninstall system units and binaries
     Uninstall {
         #[arg(long)]
         purge: bool,
+        #[arg(short = 'y', long)]
+        yes: bool,
     },
     /// Generate shell completions
     Completions {
@@ -101,11 +103,21 @@ mod tests {
         assert!(matches!(
             args.command,
             Some(Commands::Timer {
-                timer: Some(TimerCommands::Status)
+                timer: TimerCommands::Status
             })
         ));
         for removed in ["setup", "proxy", "cron"] {
             assert!(Args::try_parse_from(["mihoto", removed]).is_err());
         }
+
+        let uninstall = Args::parse_from(["mihoto", "uninstall", "--purge", "--yes"]);
+        assert!(matches!(
+            uninstall.command,
+            Some(Commands::Uninstall {
+                purge: true,
+                yes: true
+            })
+        ));
+        assert!(Args::try_parse_from(["mihoto", "timer"]).is_err());
     }
 }

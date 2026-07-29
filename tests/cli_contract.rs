@@ -69,3 +69,56 @@ fn read_only_commands_do_not_need_config_or_real_systemd() {
         .success()
         .stdout(predicate::str::contains("mihoto"));
 }
+
+#[cfg(unix)]
+#[test]
+fn a_fake_id_command_cannot_bypass_the_root_guard() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let id = dir.path().join("id");
+    let systemctl = dir.path().join("systemctl");
+    let calls = dir.path().join("calls");
+    fs::write(&id, "#!/bin/sh\nprintf '0\\n'\n").unwrap();
+    fs::write(
+        &systemctl,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 0\n",
+            calls.display()
+        ),
+    )
+    .unwrap();
+    for program in [&id, &systemctl] {
+        fs::set_permissions(program, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = format!(
+        "{}:{}",
+        dir.path().display(),
+        std::env::var("PATH").unwrap()
+    );
+
+    Command::cargo_bin("mihoto")
+        .unwrap()
+        .args(["--config", "/missing/mihoto.toml", "start"])
+        .env("PATH", path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("requires root"));
+    assert!(!calls.exists());
+    assert!(!dir.path().join("mihoto.toml").exists());
+}
+
+#[test]
+fn timer_requires_an_explicit_subcommand() {
+    Command::cargo_bin("mihoto")
+        .unwrap()
+        .arg("timer")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Usage"));
+}
