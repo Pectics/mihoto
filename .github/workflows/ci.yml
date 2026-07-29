@@ -12,13 +12,14 @@ jobs:
     name: CI
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
         with:
+          toolchain: 1.88.0
           components: clippy, rustfmt
 
       - name: Setup cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1
 
       - name: Check cargo fmt
         run: cargo fmt --all -- --check
@@ -38,8 +39,12 @@ jobs:
       - name: Check installer
         run: |
           sh -n install.sh
+          scripts/test-installer-contract.sh
           sh -n scripts/test-systemd-integration.sh
           sh -n scripts/test-tun-integration.sh
 
       - name: Check system scope
         run: scripts/check-system-scope.sh
+
+      - name: Check release workflow contract
+        run: scripts/check-release-workflow.sh

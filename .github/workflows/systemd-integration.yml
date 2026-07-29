@@ -5,8 +5,10 @@ jobs:
     name: systemd, TUN, and firewall integration
     runs-on: [self-hosted, linux, systemd, tun]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: 1.88.0
       - run: cargo build --release
       - name: Verify pinned real Mihomo fixture
         run: |
