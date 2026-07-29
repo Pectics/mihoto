@@ -32,8 +32,14 @@ jobs:
       - name: Run tests
         run: cargo test --all-targets
 
+      - name: Run tests without self-update
+        run: cargo test --all-targets --no-default-features
+
       - name: Check installer
-        run: sh -n install.sh
+        run: |
+          sh -n install.sh
+          sh -n scripts/test-systemd-integration.sh
+          sh -n scripts/test-tun-integration.sh
 
       - name: Check system scope
         run: scripts/check-system-scope.sh
