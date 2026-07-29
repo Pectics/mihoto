@@ -112,10 +112,7 @@ pub fn detect_arch() -> Result<String> {
         "s390x" => Ok("s390x".to_string()),
         // LoongArch 64-bit
         "loongarch64" => Ok("loong64-abi2".to_string()),
-        _ => bail!(
-            "unsupported architecture: {} (use --arch to specify manually)",
-            arch
-        ),
+        _ => bail!("unsupported architecture: {arch} (use --arch to specify manually)"),
     }
 }
 
@@ -191,7 +188,7 @@ pub fn build_download_url(version: &str, arch: &str, channel: &MihomoChannel) ->
             "https://github.com/MetaCubeX/mihomo/releases/download/Prerelease-Alpha"
         }
     };
-    format!("{}/mihomo-linux-{}-{}.gz", base, arch, version)
+    format!("{base}/mihomo-linux-{arch}-{version}.gz")
 }
 
 /// Resolves the Mihomo binary download URL.
@@ -238,7 +235,7 @@ pub async fn resolve_binary(
         "{} Fetching latest mihomo {} release for {}...",
         prefix.cyan(),
         channel_name.bold(),
-        format!("linux-{}", arch).bold()
+        format!("linux-{arch}").bold()
     );
 
     let version = fetch_latest_version(client, channel, &config.mihoto_user_agent).await?;

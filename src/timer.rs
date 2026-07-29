@@ -22,7 +22,7 @@ pub fn render_timer(interval: u16) -> Result<String> {
     if interval > 24 {
         bail!("auto_update_interval must be between 0 and 24 hours");
     }
-    Ok(format!("[Unit]\nDescription=Periodic mihoto update\n\n[Timer]\nOnBootSec=15min\nOnUnitActiveSec={}h\nRandomizedDelaySec=5min\nPersistent=true\nUnit=mihoto-update.service\n\n[Install]\nWantedBy=timers.target\n", interval))
+    Ok(format!("[Unit]\nDescription=Periodic mihoto update\n\n[Timer]\nOnBootSec=15min\nOnUnitActiveSec={interval}h\nRandomizedDelaySec=5min\nPersistent=true\nUnit=mihoto-update.service\n\n[Install]\nWantedBy=timers.target\n"))
 }
 fn write_unit(path: &Path, content: &str) -> Result<()> {
     let parent = path

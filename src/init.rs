@@ -131,9 +131,8 @@ fn bootstrap_config(config_path: &str, yes: bool) -> Result<Config> {
     if config.remote_config_url.is_empty() {
         if yes {
             bail!(
-                "`remote_config_url` is not set - edit `{}` or run `mihoto init` interactively",
-                config_path
-            );
+				"`remote_config_url` is not set - edit `{config_path}` or run `mihoto init` interactively"
+			);
         }
 
         if just_created {

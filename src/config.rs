@@ -218,7 +218,7 @@ pub fn validate_config(config: &Config) -> Result<()> {
     ];
     for (field, value) in required_fields.iter() {
         if value.is_empty() {
-            bail!("`{}` undefined", field);
+            bail!("`{field}` undefined");
         }
     }
     for (field, value) in [

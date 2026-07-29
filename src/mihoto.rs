@@ -378,8 +378,7 @@ impl Mihoto {
                         installed_version.bold()
                     );
                     return Ok(StageStatus::Skipped(format!(
-                        "already at {}",
-                        installed_version
+                        "already at {installed_version}"
                     )));
                 }
                 Ok(Some(installed_version)) => {
