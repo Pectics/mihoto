@@ -114,8 +114,27 @@ impl Mihoto {
     ///
     /// Must run *after* every other network-dependent stage; see [`BinaryPlan`].
     pub async fn install_binary(&self, temp_file: NamedTempFile) -> Result<StageStatus> {
+        let target = Path::new(&self.mihomo_target_binary_path);
+        create_parent_dir(target)?;
+        let parent = target.parent().ok_or_else(|| {
+            anyhow!(
+                "binary path has no parent: {}",
+                self.mihomo_target_binary_path
+            )
+        })?;
+        let staged = NamedTempFile::new_in(parent)?;
+        extract_gzip(
+            temp_file.path(),
+            staged.path().to_string_lossy().as_ref(),
+            DETAIL_PREFIX.cyan(),
+        )?;
+        staged
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o755))?;
+        staged.as_file().sync_all()?;
+
         // Stop mihomo.service before overwriting to avoid "Text file busy".
-        let binary_exists = fs::metadata(&self.mihomo_target_binary_path).is_ok();
+        let binary_exists = target.exists();
         if binary_exists {
             println!(
                 "{} Stopping mihomo.service before overwriting binary...",
@@ -123,15 +142,56 @@ impl Mihoto {
             );
             Systemctl::new().stop("mihomo.service").execute()?;
         }
-
-        extract_gzip(
-            temp_file.path(),
-            &self.mihomo_target_binary_path,
-            DETAIL_PREFIX.cyan(),
-        )?;
-        let executable = fs::Permissions::from_mode(0o755);
-        fs::set_permissions(&self.mihomo_target_binary_path, executable)?;
+        staged.persist(target).map_err(|error| error.error)?;
         Ok(StageStatus::Installed)
+    }
+
+    fn ensure_config_root_secure(&self) -> Result<()> {
+        fs::create_dir_all(&self.mihomo_target_config_root)?;
+        fs::set_permissions(
+            &self.mihomo_target_config_root,
+            fs::Permissions::from_mode(0o750),
+        )?;
+        Ok(())
+    }
+
+    fn apply_existing_config_atomically(&self) -> Result<bool> {
+        self.ensure_config_root_secure()?;
+        let target = Path::new(&self.mihomo_target_config_path);
+        let staged = NamedTempFile::new_in(&self.mihomo_target_config_root)?;
+        fs::copy(target, staged.path())?;
+        fs::set_permissions(staged.path(), fs::Permissions::from_mode(0o600))?;
+        let changed = apply_mihomo_override(
+            staged.path().to_string_lossy().as_ref(),
+            &self.config.mihomo_config,
+        )?;
+        if changed {
+            staged.as_file().sync_all()?;
+            staged.persist(target).map_err(|error| error.error)?;
+        } else {
+            fs::set_permissions(target, fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(changed)
+    }
+
+    async fn download_and_install_config(&self, client: &Client) -> Result<()> {
+        self.ensure_config_root_secure()?;
+        let target = Path::new(&self.mihomo_target_config_path);
+        let staged = NamedTempFile::new_in(&self.mihomo_target_config_root)?;
+        download_file(
+            client,
+            &self.config.remote_config_url,
+            staged.path(),
+            &self.config.mihoto_user_agent,
+        )
+        .await?;
+        let staged_path = staged.path().to_string_lossy();
+        try_decode_base64_file_inplace(staged_path.as_ref())?;
+        apply_mihomo_override(staged_path.as_ref(), &self.config.mihomo_config)?;
+        fs::set_permissions(staged.path(), fs::Permissions::from_mode(0o600))?;
+        staged.as_file().sync_all()?;
+        staged.persist(target).map_err(|error| error.error)?;
+        Ok(())
     }
 
     /// Download remote config YAML and apply TOML overrides.
@@ -140,8 +200,7 @@ impl Mihoto {
         let config_path = Path::new(&self.mihomo_target_config_path);
         if !force && config_path.exists() {
             // Re-apply TOML overrides onto the cached YAML so user changes take effect.
-            let changed =
-                apply_mihomo_override(&self.mihomo_target_config_path, &self.config.mihomo_config)?;
+            let changed = self.apply_existing_config_atomically()?;
             return if changed {
                 Ok(StageStatus::Installed)
             } else {
@@ -149,24 +208,7 @@ impl Mihoto {
             };
         }
 
-        fs::create_dir_all(&self.mihomo_target_config_root)?;
-        fs::set_permissions(
-            &self.mihomo_target_config_root,
-            fs::Permissions::from_mode(0o750),
-        )?;
-        download_file(
-            client,
-            &self.config.remote_config_url,
-            config_path,
-            &self.config.mihoto_user_agent,
-        )
-        .await?;
-        try_decode_base64_file_inplace(&self.mihomo_target_config_path)?;
-        fs::set_permissions(
-            &self.mihomo_target_config_path,
-            fs::Permissions::from_mode(0o600),
-        )?;
-        apply_mihomo_override(&self.mihomo_target_config_path, &self.config.mihomo_config)?;
+        self.download_and_install_config(client).await?;
         Ok(StageStatus::Installed)
     }
 
@@ -369,41 +411,11 @@ impl Mihoto {
         )
         .await?;
 
-        // Stop mihomo.service before overwriting binary to avoid "Text file busy" error
-        println!(
-            "{} Stopping mihomo.service before overwriting...",
-            DETAIL_PREFIX.yellow()
-        );
-        Systemctl::new().stop("mihomo.service").execute()?;
-
-        // Extract and overwrite the binary
-        extract_gzip(
-            temp_path,
-            &self.mihomo_target_binary_path,
-            DETAIL_PREFIX.cyan(),
-        )?;
-
-        // Set executable permission
-        let executable = fs::Permissions::from_mode(0o755);
-        fs::set_permissions(&self.mihomo_target_binary_path, executable)?;
-
-        Ok(StageStatus::Installed)
+        self.install_binary(temp_file).await
     }
 
     pub async fn update_config(&self, client: &Client) -> Result<StageStatus> {
-        // Download remote mihomo config and apply override
-        download_file(
-            client,
-            &self.config.remote_config_url,
-            Path::new(&self.mihomo_target_config_path),
-            &self.config.mihoto_user_agent,
-        )
-        .await?;
-
-        // Try to decode base64 file in place if file is base64 encoding, otherwise do nothing
-        try_decode_base64_file_inplace(&self.mihomo_target_config_path)?;
-
-        apply_mihomo_override(&self.mihomo_target_config_path, &self.config.mihomo_config)?;
+        self.download_and_install_config(client).await?;
         println!(
             "{} Updated and applied config overrides",
             DETAIL_PREFIX.cyan()
@@ -475,14 +487,11 @@ impl Mihoto {
 
     pub async fn apply(&self) -> Result<()> {
         // Apply mihomo config override
-        apply_mihomo_override(&self.mihomo_target_config_path, &self.config.mihomo_config).map(
-            |_| {
-                println!(
-                    "{} Applied mihomo config overrides",
-                    self.prefix.green().bold()
-                );
-            },
-        )?;
+        self.apply_existing_config_atomically()?;
+        println!(
+            "{} Applied mihomo config overrides",
+            self.prefix.green().bold()
+        );
 
         // Restart mihomo systemd service
         Systemctl::new()
