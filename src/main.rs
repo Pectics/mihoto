@@ -129,6 +129,12 @@ async fn main() {
 
 async fn cli() -> Result<()> {
     let args = Args::parse();
+    if args.command.as_ref().is_some_and(|command| {
+        matches!(command, Commands::Init { .. } | Commands::Uninstall { .. })
+            || command_requires_config(command)
+    }) {
+        config::validate_manager_config_path(Path::new(&args.mihoto_config))?;
+    }
 
     // Read-only commands deliberately do not load or create the manager configuration.
     match &args.command {
