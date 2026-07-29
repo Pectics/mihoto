@@ -48,3 +48,6 @@ jobs:
 
       - name: Check release workflow contract
         run: scripts/check-release-workflow.sh
+
+      - name: Check v1 product contract
+        run: scripts/check-v1-contract.sh

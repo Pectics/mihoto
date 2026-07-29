@@ -76,6 +76,7 @@ jobs:
           cargo test --all-targets --no-default-features
           scripts/check-system-scope.sh
           scripts/check-release-workflow.sh
+          scripts/check-v1-contract.sh
 
   build:
     name: Build ${{ matrix.target }}
