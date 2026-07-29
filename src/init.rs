@@ -1,5 +1,6 @@
 use crate::config::{load_config, validate_config, write_default_if_missing, Config};
 use crate::mihoto::{BinaryPlan, Mihoto, StageStatus};
+use crate::timer;
 
 use std::{future::Future, path::Path};
 
@@ -221,11 +222,17 @@ pub async fn run(config_path: &str, client: &Client, opts: InitOptions) -> Resul
     // binary or restarting mihomo.service on top of a missing / corrupt config.yaml
     // would break an environment that may have been working before.
 
-    if report.stage_failed("remote config") {
-        let skip = || StageStatus::Skipped("skipped: remote config stage failed".to_string());
+    if report.stage_failed("remote config") || report.stage_failed("mihomo binary") {
+        let reason = if report.stage_failed("remote config") {
+            "remote config stage failed"
+        } else {
+            "mihomo binary stage failed"
+        };
+        let skip = || StageStatus::Skipped(format!("skipped: {reason}"));
         report.record("install binary", skip());
         report.record("systemd service", skip());
         report.record("service start", skip());
+        report.record("update timer", skip());
     } else {
         report.begin("install binary", Some("installing mihomo binary"));
         let install_status = match binary_temp {
@@ -237,20 +244,69 @@ pub async fn run(config_path: &str, client: &Client, opts: InitOptions) -> Resul
         };
         report.record("install binary", install_status);
 
-        report
-            .run(
+        if report.stage_failed("install binary") {
+            report.record(
                 "systemd service",
-                Some("writing systemd service"),
-                || async { mihoto.ensure_service().await },
-            )
-            .await;
-        report
-            .run(
+                StageStatus::Skipped("skipped: binary installation failed".to_string()),
+            );
+            report.record(
                 "service start",
-                Some("starting and enabling mihomo.service"),
-                || async { mihoto.ensure_service_running().await },
-            )
-            .await;
+                StageStatus::Skipped("skipped: binary installation failed".to_string()),
+            );
+            report.record(
+                "update timer",
+                StageStatus::Skipped("skipped: binary installation failed".to_string()),
+            );
+        } else {
+            report
+                .run(
+                    "systemd service",
+                    Some("writing systemd service"),
+                    || async { mihoto.ensure_service().await },
+                )
+                .await;
+            if report.stage_failed("systemd service") {
+                report.record(
+                    "service start",
+                    StageStatus::Skipped("skipped: systemd service stage failed".to_string()),
+                );
+                report.record(
+                    "update timer",
+                    StageStatus::Skipped("skipped: systemd service stage failed".to_string()),
+                );
+            } else {
+                report
+                    .run(
+                        "service start",
+                        Some("starting and enabling mihomo.service"),
+                        || async { mihoto.ensure_service_running().await },
+                    )
+                    .await;
+                if report.has_failures() {
+                    report.record(
+                        "update timer",
+                        StageStatus::Skipped("skipped due to earlier failures".to_string()),
+                    );
+                } else {
+                    report
+                        .run(
+                            "update timer",
+                            Some("reconciling mihoto-update.timer"),
+                            || async {
+                                timer::reconcile(&config, config_path)?;
+                                if config.auto_update_interval == 0 {
+                                    Ok(StageStatus::Skipped(
+                                        "disabled by auto_update_interval".to_string(),
+                                    ))
+                                } else {
+                                    Ok(StageStatus::Installed)
+                                }
+                            },
+                        )
+                        .await;
+                }
+            }
+        }
     }
 
     report.print();
