@@ -178,6 +178,16 @@ impl Config {
     }
 }
 
+pub fn validate_manager_config_path(path: &Path) -> Result<()> {
+    if !path.is_absolute() {
+        bail!("manager config path must be absolute: {}", path.display());
+    }
+    if path.file_name().is_none() {
+        bail!("manager config path must name a file: {}", path.display());
+    }
+    Ok(())
+}
+
 /// Load config from path without validation.  Returns `Ok(None)` if the file does not exist.
 pub fn load_config(path: &str) -> Result<Option<Config>> {
     let config_path = Path::new(path);
@@ -210,35 +220,32 @@ pub fn validate_config(config: &Config) -> Result<()> {
         if value.is_empty() {
             bail!("`{}` undefined", field);
         }
-        for (field, value) in [
-            ("mihoto_binary_path", &config.mihoto_binary_path),
-            ("mihomo_binary_path", &config.mihomo_binary_path),
-            ("mihomo_config_root", &config.mihomo_config_root),
-        ] {
-            if !Path::new(value).is_absolute() {
-                bail!("`{field}` must be an absolute path");
-            }
+    }
+    for (field, value) in [
+        ("mihoto_binary_path", &config.mihoto_binary_path),
+        ("mihomo_binary_path", &config.mihomo_binary_path),
+        ("mihomo_config_root", &config.mihomo_config_root),
+    ] {
+        if !Path::new(value).is_absolute() {
+            bail!("`{field}` must be an absolute path");
         }
-        if config.auto_update_interval > 24 {
-            bail!("`auto_update_interval` must be between 0 and 24 hours");
-        }
+    }
+    if config.auto_update_interval > 24 {
+        bail!("`auto_update_interval` must be between 0 and 24 hours");
     }
     Ok(())
 }
 
 /// Tries to parse mihoto config as toml from path.
 ///
-/// * If config file does not exist, creates default config file and returns an error directing
-///   the user to run `mihoto init`.
+/// * If config file does not exist, returns an error directing the user to run `mihoto init`.
 /// * If found, parses the file and validates required fields.
 pub fn parse_config(path: &str) -> Result<Config> {
     let config_path = Path::new(path);
-    create_parent_dir(config_path)?;
 
     if !config_path.exists() {
-        Config::new().write(config_path)?;
         bail!(
-            "created default config at `{}`, run `mihoto init` to finish setup",
+            "config `{}` does not exist; run `mihoto init` first",
             path.underline()
         );
     }
