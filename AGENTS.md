@@ -31,10 +31,11 @@ cargo fmt --all
 cargo fmt --all -- --check  # Verify formatting
 
 # Lint
-cargo clippy
+cargo clippy --all-targets -- -D warnings
 
 # Run tests
-cargo test
+cargo test --all-targets
+cargo test --all-targets --no-default-features
 
 # Local installation
 cargo install --path .
@@ -45,8 +46,10 @@ cargo install --path .
 From `.github/workflows/ci.yml`:
 ```bash
 cargo fmt --all -- --check
-cargo clippy
+cargo clippy --all-targets -- -D warnings
 cargo check --all-targets
+cargo test --all-targets
+scripts/check-system-scope.sh
 ```
 
 ## Architecture
