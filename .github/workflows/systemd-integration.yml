@@ -8,7 +8,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release
+      - name: Verify pinned real Mihomo fixture
+        run: |
+          test -x /usr/local/libexec/mihoto-test/mihomo
+          /usr/local/libexec/mihoto-test/mihomo -v
       - name: systemd integration
         run: sudo env MIHOTO_SYSTEMD_INTEGRATION=1 MIHOTO_ALLOW_SYSTEMD_MUTATION=1 scripts/test-systemd-integration.sh
       - name: TUN and firewall integration
-        run: sudo scripts/test-tun-integration.sh
+        run: sudo env MIHOTO_TUN_INTEGRATION=1 MIHOTO_ALLOW_SYSTEMD_MUTATION=1 MIHOTO_REAL_MIHOMO=/usr/local/libexec/mihoto-test/mihomo scripts/test-tun-integration.sh
