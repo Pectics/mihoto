@@ -93,7 +93,7 @@ impl Default for MihomoConfig {
             mode: MihomoMode::Rule,
             log_level: MihomoLogLevel::Info,
             ipv6: Some(true),
-            external_controller: Some(String::from("0.0.0.0:9090")),
+			external_controller: Some(String::from("127.0.0.1:9090")),
             external_ui: Some(String::from("ui")),
             secret: None,
             geodata_mode: Some(false),
@@ -367,6 +367,10 @@ mod tests {
         assert_eq!(config.mihomo_config_root, "/etc/mihomo");
         assert_eq!(config.mihoto_user_agent, "mihoto");
         assert_eq!(config.auto_update_interval, 12);
+        assert_eq!(
+            config.mihomo_config.external_controller.as_deref(),
+            Some("127.0.0.1:9090")
+        );
         let mut relative = config.clone();
         relative.mihomo_config_root = "relative".into();
         assert!(validate_config(&relative).is_err());
