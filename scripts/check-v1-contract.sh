@@ -10,8 +10,8 @@ audit_record=docs/audits/v1.0.0-rc.1.md
 test -f "$contract"
 test -f "$release_notes"
 test -f "$audit_record"
-rg -Fq 'version = "1.0.0-rc.1"' Cargo.toml
-rg -Fq '1.0.0-rc.1' Cargo.lock
+grep -Fq 'version = "1.0.0-rc.1"' Cargo.toml
+grep -Fq '1.0.0-rc.1' Cargo.lock
 
 for required in \
 	'/etc/mihoto.toml' \
@@ -31,12 +31,12 @@ for required in \
 	'SHA256SUMS' \
 	'attestation' \
 	'--version <semver>'; do
-	rg -Fqi -- "$required" "$contract" README.md "$release_notes"
+	grep -Fqi -- "$required" "$contract" README.md "$release_notes"
 done
 
-rg -Fq 'command_requires_root' src/main.rs
-rg -Fq 'Commands::Upgrade { check: true' src/main.rs
-rg -Fq 'SHA256SUMS' src/upgrade.rs
-rg -Fq 'atomic_replace' src/upgrade.rs
+grep -Fq 'command_requires_root' src/main.rs
+grep -Fq 'Commands::Upgrade { check: true' src/main.rs
+grep -Fq 'SHA256SUMS' src/upgrade.rs
+grep -Fq 'atomic_replace' src/upgrade.rs
 scripts/check-system-scope.sh
 scripts/check-release-workflow.sh
