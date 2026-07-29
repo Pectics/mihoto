@@ -25,6 +25,21 @@ pub const MAX_RETRIES: usize = 3;
 pub const DETAIL_PREFIX: &str = "   ";
 pub const MIHOTO_GITHUB_MIRROR_ENV: &str = "MIHOTO_GITHUB_MIRROR";
 
+pub fn systemd_escape_exec_arg(value: &str) -> String {
+    if value
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || "/._:-".contains(character))
+    {
+        return value.to_string();
+    }
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('$', "$$")
+        .replace('%', "%%");
+    format!("\"{escaped}\"")
+}
+
 /// Shared retry strategy for HTTP operations.
 ///
 /// Yields up to [`MAX_RETRIES`] retries (so up to `MAX_RETRIES + 1` total attempts) with
@@ -427,5 +442,21 @@ mod tests {
         );
 
         std::env::remove_var(MIHOTO_GITHUB_MIRROR_ENV);
+    }
+
+    #[test]
+    fn test_systemd_escape_exec_arg() {
+        assert_eq!(
+            systemd_escape_exec_arg("/usr/local/bin/mihomo"),
+            "/usr/local/bin/mihomo"
+        );
+        assert_eq!(
+            systemd_escape_exec_arg("/opt/mihomo core"),
+            "\"/opt/mihomo core\""
+        );
+        assert_eq!(
+            systemd_escape_exec_arg("/opt/$mihomo%core"),
+            "\"/opt/$$mihomo%%core\""
+        );
     }
 }
