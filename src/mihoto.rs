@@ -4,13 +4,14 @@ use crate::systemctl::Systemctl;
 use crate::timer;
 use crate::ui::{install_ui, resolve_external_ui_path};
 use crate::utils::{
-    create_parent_dir, delete_file, download_file, extract_gzip, try_decode_base64_file_inplace,
-    DETAIL_PREFIX,
+    create_parent_dir, delete_file, download_file, extract_gzip, systemd_escape_exec_arg,
+    try_decode_base64_file_inplace, DETAIL_PREFIX,
 };
 
 use anyhow::Error;
 
 use std::fs;
+use std::io::Write;
 use std::os::unix::prelude::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -296,15 +297,28 @@ impl Mihoto {
         );
         if let Ok(existing) = fs::read_to_string(&self.mihomo_target_service_path) {
             if existing == service_content {
+                fs::set_permissions(
+                    &self.mihomo_target_service_path,
+                    fs::Permissions::from_mode(0o644),
+                )?;
                 return Ok(StageStatus::Skipped("service file unchanged".to_string()));
             }
         }
-        create_parent_dir(Path::new(&self.mihomo_target_service_path))?;
-        fs::write(&self.mihomo_target_service_path, &service_content)?;
-        fs::set_permissions(
-            &self.mihomo_target_service_path,
-            fs::Permissions::from_mode(0o644),
-        )?;
+        let service_path = Path::new(&self.mihomo_target_service_path);
+        create_parent_dir(service_path)?;
+        let parent = service_path.parent().ok_or_else(|| {
+            anyhow!(
+                "service path has no parent: {}",
+                self.mihomo_target_service_path
+            )
+        })?;
+        let mut staged = NamedTempFile::new_in(parent)?;
+        staged.write_all(service_content.as_bytes())?;
+        staged
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o644))?;
+        staged.as_file().sync_all()?;
+        staged.persist(service_path).map_err(|error| error.error)?;
         Systemctl::new().daemon_reload().execute()?;
         println!(
             "{} Created mihomo.service at {}",
@@ -598,7 +612,8 @@ fn render_service_string(binary_path: &str, config_root: &str) -> String {
     format!(
         "[Unit]
 Description=mihomo Daemon, Another Clash Kernel.
-After=network.target NetworkManager.service systemd-networkd.service iwd.service
+Wants=network-online.target
+After=network-online.target NetworkManager.service systemd-networkd.service iwd.service
 
 [Service]
 Type=simple
@@ -614,7 +629,8 @@ ExecReload=/bin/kill -HUP $MAINPID
 
 [Install]
 WantedBy=multi-user.target",
-        binary_path, config_root
+        systemd_escape_exec_arg(binary_path),
+        systemd_escape_exec_arg(config_root)
     )
 }
 
@@ -626,6 +642,8 @@ mod tests {
         let unit = render_service_string("/usr/local/bin/mihomo", "/etc/mihomo");
         for value in [
             "User=root",
+            "Wants=network-online.target",
+            "After=network-online.target",
             "CapabilityBoundingSet=CAP_NET_ADMIN",
             "AmbientCapabilities=CAP_NET_ADMIN",
             "ExecStart=/usr/local/bin/mihomo -d /etc/mihomo",
