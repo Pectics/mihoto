@@ -1,4 +1,7 @@
-use std::process::{Command, ExitStatus};
+use std::{
+    path::Path,
+    process::{Command, ExitStatus},
+};
 
 use anyhow::{Context, Result};
 
@@ -8,8 +11,12 @@ pub struct Systemctl {
 
 impl Systemctl {
     pub fn new() -> Self {
+        Self::with_program(Path::new("systemctl"))
+    }
+
+    pub fn with_program(program: &Path) -> Self {
         Self {
-            systemctl: Command::new("systemctl"),
+            systemctl: Command::new(program),
         }
     }
 
@@ -48,18 +55,8 @@ impl Systemctl {
         self
     }
 
-    pub fn disable(&mut self, service: &str) -> &mut Self {
-        self.systemctl.arg("disable").arg(service);
-        self
-    }
-
     pub fn daemon_reload(&mut self) -> &mut Self {
         self.systemctl.arg("daemon-reload");
-        self
-    }
-
-    pub fn reset_failed(&mut self) -> &mut Self {
-        self.systemctl.arg("reset-failed");
         self
     }
 
@@ -77,7 +74,11 @@ impl Systemctl {
 
     /// Returns `true` if the given system service is currently active.
     pub fn is_active(service: &str) -> bool {
-        Command::new("systemctl")
+        Self::is_active_with_program(Path::new("systemctl"), service)
+    }
+
+    pub fn is_active_with_program(program: &Path, service: &str) -> bool {
+        Command::new(program)
             .arg("is-active")
             .arg("--quiet")
             .arg(service)
@@ -88,7 +89,11 @@ impl Systemctl {
 
     /// Returns `true` if the given system service is enabled for autostart.
     pub fn is_enabled(service: &str) -> bool {
-        Command::new("systemctl")
+        Self::is_enabled_with_program(Path::new("systemctl"), service)
+    }
+
+    pub fn is_enabled_with_program(program: &Path, service: &str) -> bool {
+        Command::new(program)
             .arg("is-enabled")
             .arg("--quiet")
             .arg(service)
