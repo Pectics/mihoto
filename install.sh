@@ -1,405 +1,251 @@
 #!/bin/sh
 # shellcheck shell=dash
 
+REPOSITORY='Pectics/mihoto'
+API_BASE="https://api.github.com/repos/$REPOSITORY"
+DOWNLOAD_BASE="https://github.com/$REPOSITORY/releases/download"
+
 main() {
-  if [ "$KSH_VERSION" = 'Version JM 93t+ 2010-03-05' ]; then
-    # The version of ksh93 that ships with many illumos systems does not
-    # support the "local" extension.  Print a message rather than fail in
-    # subtle ways later on:
-    err 'the installer does not work with this ksh93 version; please try bash'
-  fi
+	set -eu
 
-  set -u
-  set -e  # Exit on error
+	mirror=''
+	requested_version=''
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+			--version)
+				[ "$#" -ge 2 ] || err '--version requires a semantic version'
+				requested_version="$2"
+				shift 2
+				;;
+			--mirror)
+				[ "$#" -ge 2 ] || err '--mirror requires a URL'
+				mirror="$2"
+				shift 2
+				;;
+			--no-mirror)
+				mirror=''
+				shift
+				;;
+			-h | --help)
+				usage
+				exit 0
+				;;
+			*)
+				err "unknown option: $1"
+				;;
+		esac
+	done
 
-  # Default: no mirror (can be overridden via --mirror)
-  _mirror=""
+	need_cmd awk
+	need_cmd cp
+	need_cmd grep
+	need_cmd head
+	need_cmd id
+	need_cmd mkdir
+	need_cmd mktemp
+	need_cmd mv
+	need_cmd sed
+	need_cmd sha256sum
+	need_cmd tar
 
-  # Parse arguments
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --mirror)
-        _mirror="$2"
-        shift 2
-        ;;
-      --no-mirror)
-        _mirror=""
-        shift
-        ;;
-      *)
-        err "Unknown option: $1"
-        ;;
-    esac
-  done
+	if check_cmd curl; then
+		downloader=curl
+	elif check_cmd wget; then
+		downloader=wget
+	else
+		err 'need curl or wget'
+	fi
 
-  # Detect and print host target triple.
-  ensure get_architecture
-  local _arch="$RETVAL"
-  assert_nz "$_arch" "arch"
-  echo "Detected architecture: $_arch"
+	install_dir=$(install_dir)
+	if [ -z "${MIHOTO_INSTALL_TEST_ROOT:-}" ] && [ "$(id -u)" -ne 0 ]; then
+		err 'installation to /usr/local/bin requires root; run with sudo'
+	fi
 
-  # Create and enter a temporary directory.
-  _tmp_dir="$(mktemp -d)" || err "mktemp: could not create temporary directory"
-  trap 'rm -rf "$_tmp_dir"' EXIT INT TERM
+	arch=$(get_architecture)
+	require_supported_arch "$arch"
+	echo "Detected architecture: $arch"
 
-  cd "$_tmp_dir" || err "cd: failed to enter directory: $_tmp_dir"
+	tmp_dir=$(mktemp -d) || err 'mktemp: could not create a temporary directory'
+	installed_temp=''
+	trap cleanup EXIT INT TERM
 
-  # Download and extract mihoto.
-  ensure download_mihoto "$_arch"
-  local _package="$RETVAL"
-  assert_nz "$_package" "package"
-  echo "Downloaded package: $_package"
-  case "$_package" in
-  *.tar.gz)
-    need_cmd tar
-    ensure tar -xf "$_package"
-    ;;
-  # *.zip)
-  #     need_cmd unzip
-  #     ensure unzip -oq "$_package"
-  #     ;;
-  *)
-    err "unsupported package format: $_package"
-    ;;
-  esac
+	if [ -n "$requested_version" ]; then
+		tag=$(normalize_version "$requested_version")
+		metadata_url="$API_BASE/releases/tags/$tag"
+	else
+		metadata_url="$API_BASE/releases/latest"
+	fi
+	download_file "$metadata_url" "$tmp_dir/release.json"
+	metadata_tag=$(extract_tag_name "$tmp_dir/release.json")
+	validate_release_tag "$metadata_tag"
+	if [ -n "$requested_version" ] && [ "$metadata_tag" != "$tag" ]; then
+		err "release metadata tag $metadata_tag does not match requested $tag"
+	fi
+	tag="$metadata_tag"
 
-  # Install binary.
-  local _bin_dir="/usr/local/bin"
-  local _bin_name
-  _bin_name="mihoto"
-  ensure mkdir -p "$_bin_dir"
-  ensure cp "$_bin_name" "$_bin_dir"
-  echo "Installed mihoto to $_bin_dir"
+	asset="mihoto-$tag-$arch.tar.gz"
+	checksums_url="$DOWNLOAD_BASE/$tag/SHA256SUMS"
+	download_file "$checksums_url" "$tmp_dir/SHA256SUMS"
+	expected_sha=$(checksum_for "$tmp_dir/SHA256SUMS" "$asset")
 
-  # Print success message and check $PATH.
-  echo ""
-  echo "mihoto is installed!"
-  if ! echo ":$PATH:" | grep -Fq ":$_bin_dir:"; then
-    echo "NOTE: $_bin_dir is not on your \$PATH. mihoto will not work unless it is added to \$PATH."
-  fi
+	asset_url="$DOWNLOAD_BASE/$tag/$asset"
+	if [ -n "$mirror" ]; then
+		asset_url="${mirror%/}/$asset_url"
+	fi
+	archive="$tmp_dir/$asset"
+	download_file "$asset_url" "$archive"
+	verify_checksum "$expected_sha" "$archive"
+
+	if [ "$(tar -tzf "$archive")" != 'mihoto' ]; then
+		err "release archive $asset must contain exactly one mihoto binary"
+	fi
+	target_dir="$tmp_dir/extracted"
+	mkdir "$target_dir"
+	tar -xzf "$archive" -C "$target_dir"
+	test -f "$target_dir/mihoto" || err 'release archive did not contain mihoto'
+
+	ensure mkdir -p "$install_dir"
+	installed_temp=$(mktemp "$install_dir/.mihoto.XXXXXX") || err 'could not create atomic install file'
+	ensure cp "$target_dir/mihoto" "$installed_temp"
+	ensure chmod 755 "$installed_temp"
+	if [ -z "${MIHOTO_INSTALL_TEST_ROOT:-}" ]; then
+		ensure chown root:root "$installed_temp"
+	fi
+	ensure "$installed_temp" --version
+	ensure mv -f "$installed_temp" "$install_dir/mihoto"
+	installed_temp=''
+
+	echo "Installed Mihoto $tag to $install_dir/mihoto"
 }
 
-download_mihoto() {
-  local _arch="$1"
+usage() {
+	cat <<'EOF'
+Usage: install.sh [--version <semver>] [--mirror <url>]
 
-  if check_cmd curl; then
-    _dld=curl
-  elif check_cmd wget; then
-    _dld=wget
-  else
-    need_cmd 'curl or wget'
-  fi
-  need_cmd grep
-
-  local _releases_url="https://api.github.com/repos/Pectics/mihoto/releases/latest"
-  local _releases
-  case "$_dld" in
-  curl) _releases="$(curl -sL "$_releases_url")" ||
-    err "curl: failed to download $_releases_url" ;;
-  wget) _releases="$(wget -qO- "$_releases_url")" ||
-    err "wget: failed to download $_releases_url" ;;
-  esac
-
-  local _package_url
-  _package_url="$(echo "$_releases" | grep "browser_download_url" | cut -d '"' -f 4 | grep "$_arch")" ||
-    err "mihoto has not yet been packaged for your architecture ($_arch), please file an issue at https://github.com/Pectics/mihoto/issues"
-
-  local _ext
-  case "$_package_url" in
-  *.tar.gz) _ext="tar.gz" ;;
-  # *.zip) _ext="zip" ;;
-  *) err "unsupported package format: $_package_url" ;;
-  esac
-
-  local _package="mihoto.$_ext"
-
-  # Build download URL with optional mirror prefix
-  local _download_url
-  if [ -n "$_mirror" ]; then
-    _download_url="$_mirror/$_package_url"
-  else
-    _download_url="$_package_url"
-  fi
-
-  case "$_dld" in
-  curl) curl -sLo "$_package" "$_download_url" || err "curl: failed to download $_download_url" ;;
-  wget) wget -qO "$_package" "$_download_url" || err "wget: failed to download $_download_url" ;;
-  esac
-
-  RETVAL="$_package"
+Installs the latest stable Mihoto release by default. Use --version for a
+specific stable or RC release. Release metadata and SHA256SUMS always come
+from GitHub; --mirror only proxies the archive transfer.
+EOF
 }
 
-# The below functions have been extracted with minor modifications from the
-# Rustup install script:
-#
-#   https://github.com/rust-lang/rustup/blob/4c1289b2c3f3702783900934a38d7c5f912af787/rustup-init.sh
+install_dir() {
+	if [ -n "${MIHOTO_INSTALL_TEST_ROOT:-}" ]; then
+		case "$MIHOTO_INSTALL_TEST_ROOT" in
+			/*) printf '%s/usr/local/bin\n' "${MIHOTO_INSTALL_TEST_ROOT%/}" ;;
+			*) err 'MIHOTO_INSTALL_TEST_ROOT must be absolute' ;;
+		esac
+	else
+		printf '%s\n' /usr/local/bin
+	fi
+}
 
 get_architecture() {
-  local _ostype _cputype _bitness _arch _clibtype
-  _ostype="$(uname -s)"
-  _cputype="$(uname -m)"
-  _clibtype="gnu"
+	ostype=$(uname -s)
+	if [ "$ostype" != Linux ]; then
+		err "unsupported operating system: $ostype (Mihoto supports systemd Linux only)"
+	fi
 
-  if [ "$_ostype" = Linux ]; then
-    if [ "$(uname -o)" = Android ]; then
-      _ostype=Android
-    fi
-    if ldd --version 2>&1 | grep -q 'musl'; then
-      _clibtype="musl"
-    fi
-  fi
+	cputype=${MIHOTO_TEST_UNAME_MACHINE:-$(uname -m)}
+	case "$cputype" in
+		x86_64 | x86-64 | x64 | amd64) cputype=x86_64 ;;
+		aarch64 | arm64) cputype=aarch64 ;;
+		*) printf '%s-unknown-linux-gnu\n' "$cputype"; return ;;
+	esac
 
-  if [ "$_ostype" = Darwin ] && [ "$_cputype" = i386 ]; then
-    # Darwin `uname -m` lies
-    if sysctl hw.optional.x86_64 | grep -q ': 1'; then
-      _cputype=x86_64
-    fi
-  fi
-
-  if [ "$_ostype" = SunOS ]; then
-    # Both Solaris and illumos presently announce as "SunOS" in "uname -s"
-    # so use "uname -o" to disambiguate.  We use the full path to the
-    # system uname in case the user has coreutils uname first in PATH,
-    # which has historically sometimes printed the wrong value here.
-    if [ "$(/usr/bin/uname -o)" = illumos ]; then
-      _ostype=illumos
-    fi
-
-    # illumos systems have multi-arch userlands, and "uname -m" reports the
-    # machine hardware name; e.g., "i86pc" on both 32- and 64-bit x86
-    # systems.  Check for the native (widest) instruction set on the
-    # running kernel:
-    if [ "$_cputype" = i86pc ]; then
-      _cputype="$(isainfo -n)"
-    fi
-  fi
-
-  case "$_ostype" in
-  Android)
-    _ostype=linux-android
-    ;;
-  Linux)
-    check_proc
-    _ostype=unknown-linux-$_clibtype
-    _bitness=$(get_bitness)
-    ;;
-  FreeBSD)
-    _ostype=unknown-freebsd
-    ;;
-  NetBSD)
-    _ostype=unknown-netbsd
-    ;;
-  DragonFly)
-    _ostype=unknown-dragonfly
-    ;;
-  Darwin)
-    _ostype=apple-darwin
-    ;;
-  illumos)
-    _ostype=unknown-illumos
-    ;;
-  MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    _ostype=pc-windows-msvc
-    ;;
-  *)
-    err "unrecognized OS type: $_ostype"
-    ;;
-  esac
-
-  case "$_cputype" in
-  i386 | i486 | i686 | i786 | x86)
-    _cputype=i686
-    ;;
-  xscale | arm)
-    _cputype=arm
-    if [ "$_ostype" = "linux-android" ]; then
-      _ostype=linux-androideabi
-    fi
-    ;;
-  armv6l)
-    _cputype=arm
-    if [ "$_ostype" = "linux-android" ]; then
-      _ostype=linux-androideabi
-    else
-      _ostype="${_ostype}eabihf"
-    fi
-    ;;
-  armv7l | armv8l)
-    _cputype=armv7
-    if [ "$_ostype" = "linux-android" ]; then
-      _ostype=linux-androideabi
-    else
-      _ostype="${_ostype}eabihf"
-    fi
-    ;;
-  aarch64 | arm64)
-    _cputype=aarch64
-    ;;
-  x86_64 | x86-64 | x64 | amd64)
-    _cputype=x86_64
-    ;;
-  mips)
-    _cputype=$(get_endianness mips '' el)
-    ;;
-  mips64)
-    if [ "$_bitness" -eq 64 ]; then
-      # only n64 ABI is supported for now
-      _ostype="${_ostype}abi64"
-      _cputype=$(get_endianness mips64 '' el)
-    fi
-    ;;
-  ppc)
-    _cputype=powerpc
-    ;;
-  ppc64)
-    _cputype=powerpc64
-    ;;
-  ppc64le)
-    _cputype=powerpc64le
-    ;;
-  s390x)
-    _cputype=s390x
-    ;;
-  riscv64)
-    _cputype=riscv64gc
-    ;;
-  *)
-    err "unknown CPU type: $_cputype"
-    ;;
-  esac
-
-  # Detect 64-bit linux with 32-bit userland
-  if [ "${_ostype}" = unknown-linux-musl ] && [ "${_bitness}" -eq 32 ]; then
-    case $_cputype in
-    x86_64)
-      # 32-bit executable for amd64 = x32
-      if is_host_amd64_elf; then {
-        echo "x32 userland is unsupported" 1>&2
-        exit 1
-      }; else
-        _cputype=i686
-      fi
-      ;;
-    mips64)
-      _cputype=$(get_endianness mips '' el)
-      ;;
-    powerpc64)
-      _cputype=powerpc
-      ;;
-    aarch64)
-      _cputype=armv7
-      if [ "$_ostype" = "linux-android" ]; then
-        _ostype=linux-androideabi
-      else
-        _ostype="${_ostype}eabihf"
-      fi
-      ;;
-    riscv64gc)
-      err "riscv64 with 32-bit userland unsupported"
-      ;;
-    esac
-  fi
-
-  # Detect armv7 but without the CPU features Rust needs in that build,
-  # and fall back to arm.
-  # See https://github.com/rust-lang/rustup.rs/issues/587.
-  if [ "$_ostype" = "unknown-linux-musleabihf" ] && [ "$_cputype" = armv7 ]; then
-    if ensure grep '^Features' /proc/cpuinfo | grep -q -v neon; then
-      # At least one processor does not have NEON.
-      _cputype=arm
-    fi
-  fi
-
-  _arch="${_cputype}-${_ostype}"
-  RETVAL="$_arch"
+	clibtype=gnu
+	if check_cmd ldd && ldd --version 2>&1 | grep -q musl; then
+		clibtype=musl
+	fi
+	printf '%s-unknown-linux-%s\n' "$cputype" "$clibtype"
 }
 
-get_bitness() {
-  need_cmd head
-  # Architecture detection without dependencies beyond coreutils.
-  # ELF files start out "\x7fELF", and the following byte is
-  #   0x01 for 32-bit and
-  #   0x02 for 64-bit.
-  # The printf builtin on some shells like dash only supports octal
-  # escape sequences, so we use those.
-  local _current_exe_head
-  _current_exe_head=$(head -c 5 /proc/self/exe)
-  if [ "$_current_exe_head" = "$(printf '\177ELF\001')" ]; then
-    echo 32
-  elif [ "$_current_exe_head" = "$(printf '\177ELF\002')" ]; then
-    echo 64
-  else
-    err "unknown platform bitness"
-  fi
+require_supported_arch() {
+	case "$1" in
+		x86_64-unknown-linux-gnu | x86_64-unknown-linux-musl | aarch64-unknown-linux-gnu | aarch64-unknown-linux-musl)
+			;;
+		*)
+			err "unsupported architecture: $1 (supported: x86_64/aarch64 GNU or musl Linux)"
+			;;
+	esac
 }
 
-get_endianness() {
-  local cputype=$1
-  local suffix_eb=$2
-  local suffix_el=$3
-
-  # detect endianness without od/hexdump, like get_bitness() does.
-  need_cmd head
-  need_cmd tail
-
-  local _current_exe_endianness
-  _current_exe_endianness="$(head -c 6 /proc/self/exe | tail -c 1)"
-  if [ "$_current_exe_endianness" = "$(printf '\001')" ]; then
-    echo "${cputype}${suffix_el}"
-  elif [ "$_current_exe_endianness" = "$(printf '\002')" ]; then
-    echo "${cputype}${suffix_eb}"
-  else
-    err "unknown platform endianness"
-  fi
+normalize_version() {
+	case "$1" in
+		v*) tag=$1 ;;
+		*) tag="v$1" ;;
+	esac
+	validate_release_tag "$tag"
+	printf '%s\n' "$tag"
 }
 
-is_host_amd64_elf() {
-  need_cmd head
-  need_cmd tail
-  # ELF e_machine detection without dependencies beyond coreutils.
-  # Two-byte field at offset 0x12 indicates the CPU,
-  # but we're interested in it being 0x3E to indicate amd64, or not that.
-  local _current_exe_machine
-  _current_exe_machine=$(head -c 19 /proc/self/exe | tail -c 1)
-  [ "$_current_exe_machine" = "$(printf '\076')" ]
+validate_release_tag() {
+	if ! printf '%s\n' "$1" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$'; then
+		err "invalid Mihoto release version: $1"
+	fi
 }
 
-check_proc() {
-  # Check for /proc by looking for the /proc/self/exe link.
-  # This is only run on Linux.
-  if ! test -L /proc/self/exe; then
-    err "unable to find /proc/self/exe. Is /proc mounted? Installation cannot proceed without /proc."
-  fi
+extract_tag_name() {
+	tag=$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$1" | head -n 1)
+	[ -n "$tag" ] || err "release metadata did not contain tag_name"
+	printf '%s\n' "$tag"
 }
 
-need_cmd() {
-  if ! check_cmd "$1"; then
-    err "need '$1' (command not found)"
-  fi
+download_file() {
+	url=$1
+	destination=$2
+	case "$downloader" in
+		curl)
+			curl -sSfL --output "$destination" "$url" || err "failed to download $url"
+			;;
+		wget)
+			wget -qO "$destination" "$url" || err "failed to download $url"
+			;;
+	esac
+}
+
+checksum_for() {
+	checksums=$1
+	asset=$2
+	match_count=$(awk -v asset="$asset" '$2 == asset || $2 == "*" asset { count += 1; checksum = $1 } END { print count + 0 }' "$checksums")
+	[ "$match_count" -eq 1 ] || err "SHA256SUMS must contain exactly one checksum for $asset"
+	checksum=$(awk -v asset="$asset" '$2 == asset || $2 == "*" asset { print $1 }' "$checksums")
+	case "$checksum" in
+		'' | *[!0123456789abcdefABCDEF]*) err "invalid SHA-256 for $asset" ;;
+	esac
+	[ "${#checksum}" -eq 64 ] || err "invalid SHA-256 length for $asset"
+	printf '%s\n' "$checksum"
+}
+
+verify_checksum() {
+	expected=$1
+	archive=$2
+	printf '%s  %s\n' "$expected" "$archive" | sha256sum --check --status - || err 'archive checksum verification failed'
 }
 
 check_cmd() {
-  command -v "$1" >/dev/null 2>&1
+	command -v "$1" >/dev/null 2>&1
 }
 
-# Run a command that should never fail. If the command fails execution
-# will immediately terminate with an error showing the failing
-# command.
+need_cmd() {
+	check_cmd "$1" || err "need '$1' (command not found)"
+}
+
 ensure() {
-  if ! "$@"; then err "command failed: $*"; fi
+	"$@" || err "command failed: $*"
 }
 
-assert_nz() {
-  if [ -z "$1" ]; then err "found empty string: $2"; fi
+cleanup() {
+	if [ -n "${installed_temp:-}" ]; then
+		rm -f "$installed_temp"
+	fi
+	if [ -n "${tmp_dir:-}" ]; then
+		rm -rf "$tmp_dir"
+	fi
 }
 
 err() {
-  echo "Error: $1" >&2
-  exit 1
+	echo "Error: $1" >&2
+	exit 1
 }
 
-# This is put in braces to ensure that the script does not run until it is
-# downloaded completely.
-{
-  main "$@" || exit 1
-}
+main "$@"
