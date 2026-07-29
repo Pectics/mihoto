@@ -2,64 +2,254 @@ name: Release
 
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v1 release tag to publish
+        required: true
+        type: string
   push:
     tags:
-      - "*"
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
+  validate:
+    name: Validate release identity
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: 1.88.0
+      - id: release
+        name: Validate tag and Cargo version
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -eu
+          if ! printf '%s\n' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$'; then
+            echo "refusing non-release tag: $TAG" >&2
+            exit 1
+          fi
+          VERSION="$(cargo metadata --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "mihoto") | .version')"
+          if [ "v$VERSION" != "$TAG" ]; then
+            echo "tag $TAG does not match Cargo version $VERSION" >&2
+            exit 1
+          fi
+          case "$VERSION" in
+            *-rc.*) PRERELEASE=true ;;
+            *) PRERELEASE=false ;;
+          esac
+          printf 'tag=%s\nversion=%s\nprerelease=%s\n' "$TAG" "$VERSION" "$PRERELEASE" >> "$GITHUB_OUTPUT"
+
+  quality:
+    name: Verify release candidate
+    needs: validate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: 1.88.0
+          components: clippy, rustfmt
+      - name: Run local release gates
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --all-targets -- -D warnings
+          cargo check --all-targets
+          cargo test --all-targets
+          cargo test --all-targets --no-default-features
+          scripts/check-system-scope.sh
+          scripts/check-release-workflow.sh
+
   build:
-    name: Build and publish release
-    runs-on: ubuntu-latest
+    name: Build ${{ matrix.target }}
+    needs: [validate, quality]
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
             cross: false
-            strip: true
+            machine: Advanced Micro Devices X86-64
           - target: x86_64-unknown-linux-musl
             cross: true
-            strip: true
-          - target: i686-unknown-linux-gnu
-            cross: true
-            strip: true
-          - target: i686-unknown-linux-musl
-            cross: true
-            strip: true
+            machine: Advanced Micro Devices X86-64
           - target: aarch64-unknown-linux-gnu
             cross: true
-            strip: false
+            machine: AArch64
           - target: aarch64-unknown-linux-musl
             cross: true
-            strip: false
-
+            machine: AArch64
     steps:
-      - uses: actions/checkout@master
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          target: ${{ matrix.target }}
-
-      - name: Build binaries
-        uses: ClementTsang/cargo-action@v0.0.6
+          ref: ${{ needs.validate.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
         with:
-          command: build
-          args: --release --target=${{ matrix.target }}
-          use-cross: ${{ matrix.cross }}
-
-      - name: Strip binaries
-        run: strip target/${{ matrix.target }}/release/mihoto
-        if: ${{ matrix.strip }}
-
-      - name: Package binaries
+          toolchain: 1.88.0
+          targets: ${{ matrix.target }}
+      - name: Install the pinned cross builder
+        if: matrix.cross
+        run: cargo install cross --version 0.2.5 --locked
+      - name: Build release binary
         run: |
-          cd target/${{ matrix.target }}/release
-          tar -czvf mihoto-${{ github.ref_name }}-${{ matrix.target }}.tar.gz mihoto
-          cd -
-
-      - name: Upload binaries to release
-        uses: svenstaro/upload-release-action@v2
+          if [ "${{ matrix.cross }}" = true ]; then
+            cross build --locked --release --target "${{ matrix.target }}"
+          else
+            cargo build --locked --release --target "${{ matrix.target }}"
+          fi
+      - name: Install emulators for smoke tests
+        if: startsWith(matrix.target, 'aarch64-')
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes qemu-user-static libc6-arm64-cross
+      - name: Verify binary and archive
+        env:
+          TAG: ${{ needs.validate.outputs.tag }}
+          VERSION: ${{ needs.validate.outputs.version }}
+          TARGET: ${{ matrix.target }}
+          MACHINE: ${{ matrix.machine }}
+        run: |
+          set -eu
+          binary="target/$TARGET/release/mihoto"
+          test -x "$binary"
+          readelf --file-header "$binary" | grep -F "Machine:                           $MACHINE"
+          case "$TARGET" in
+            x86_64-*) "$binary" --version ;;
+            aarch64-unknown-linux-gnu) qemu-aarch64-static -L /usr/aarch64-linux-gnu "$binary" --version ;;
+            aarch64-unknown-linux-musl) qemu-aarch64-static "$binary" --version ;;
+          esac
+          mkdir -p release-artifacts
+          archive="release-artifacts/mihoto-$TAG-$TARGET.tar.gz"
+          tar -C "target/$TARGET/release" -czf "$archive" mihoto
+          test "$(tar -tzf "$archive")" = mihoto
+          mkdir extracted
+          tar -xzf "$archive" -C extracted
+          test -x extracted/mihoto
+          case "$TARGET" in
+            x86_64-*) extracted/mihoto --version | grep -F "$VERSION" ;;
+            aarch64-unknown-linux-gnu) qemu-aarch64-static -L /usr/aarch64-linux-gnu extracted/mihoto --version | grep -F "$VERSION" ;;
+            aarch64-unknown-linux-musl) qemu-aarch64-static extracted/mihoto --version | grep -F "$VERSION" ;;
+          esac
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: target/${{ matrix.target }}/release/mihoto-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
-          asset_name: mihoto-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
-          tag: ${{ github.ref }}
+          name: mihoto-${{ matrix.target }}
+          path: release-artifacts/
+          if-no-files-found: error
+          retention-days: 7
+
+  assemble:
+    name: Assemble immutable release artifacts
+    needs: [validate, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: mihoto-*
+          path: release-artifacts
+          merge-multiple: true
+      - name: Generate and verify SHA256SUMS
+        working-directory: release-artifacts
+        run: |
+          set -eu
+          find . -maxdepth 1 -type f -name 'mihoto-*.tar.gz' -printf '%f\n' | sort | xargs sha256sum > SHA256SUMS
+          test "$(wc -l < SHA256SUMS)" -eq 4
+          sha256sum --check SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-artifacts
+          path: release-artifacts/
+          if-no-files-found: error
+          retention-days: 7
+
+  attest:
+    name: Attest release artifacts
+    needs: assemble
+    runs-on: ubuntu-24.04
+    permissions:
+      attestations: write
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: release-artifacts
+          path: release-artifacts
+      - uses: actions/attest-build-provenance@db473fddc028af60658334401dc6fa3ffd8669fd
+        with:
+          subject-path: release-artifacts/*
+
+  real-host-acceptance:
+    name: Validate systemd and TUN on x86_64
+    needs: [validate, quality]
+    runs-on: [self-hosted, linux, systemd, tun, x64]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: 1.88.0
+      - run: cargo build --locked --release
+      - name: Exercise real systemd and TUN lifecycle
+        run: sudo env MIHOTO_SYSTEMD_INTEGRATION=1 MIHOTO_ALLOW_SYSTEMD_MUTATION=1 MIHOTO_TUN_INTEGRATION=1 MIHOTO_REAL_MIHOMO=/usr/local/libexec/mihoto-test/mihomo scripts/test-systemd-integration.sh
+      - name: Exercise real TUN routing and cleanup
+        run: sudo env MIHOTO_TUN_INTEGRATION=1 MIHOTO_ALLOW_SYSTEMD_MUTATION=1 MIHOTO_REAL_MIHOMO=/usr/local/libexec/mihoto-test/mihomo scripts/test-tun-integration.sh
+
+  real-host-acceptance-arm64:
+    name: Validate systemd and TUN on aarch64
+    needs: [validate, quality]
+    runs-on: [self-hosted, linux, systemd, tun, arm64]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: 1.88.0
+      - run: cargo build --locked --release
+      - name: Exercise real systemd and TUN lifecycle
+        run: sudo env MIHOTO_SYSTEMD_INTEGRATION=1 MIHOTO_ALLOW_SYSTEMD_MUTATION=1 MIHOTO_TUN_INTEGRATION=1 MIHOTO_REAL_MIHOMO=/usr/local/libexec/mihoto-test/mihomo scripts/test-systemd-integration.sh
+      - name: Exercise real TUN routing and cleanup
+        run: sudo env MIHOTO_TUN_INTEGRATION=1 MIHOTO_ALLOW_SYSTEMD_MUTATION=1 MIHOTO_REAL_MIHOMO=/usr/local/libexec/mihoto-test/mihomo scripts/test-tun-integration.sh
+
+  release:
+    name: Publish verified release
+    needs: [validate, quality, assemble, attest, real-host-acceptance, real-host-acceptance-arm64]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: release-artifacts
+          path: release-artifacts
+      - name: Publish only verified artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.validate.outputs.tag }}
+          PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+        run: |
+          set -eu
+          if [ "$PRERELEASE" = true ]; then
+            gh release create "$TAG" release-artifacts/* --title "Mihoto $TAG" --prerelease --generate-notes
+          else
+            gh release create "$TAG" release-artifacts/* --title "Mihoto $TAG" --latest --generate-notes
+          fi
