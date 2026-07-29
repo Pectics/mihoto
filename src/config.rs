@@ -1,11 +1,12 @@
 use crate::ui::{default_ui, Ui};
 use crate::utils::create_parent_dir;
 
-use std::{collections::HashMap, fs, path::Path};
+use std::{collections::HashMap, fs, io::Write, path::Path};
 
 use anyhow::{bail, Result};
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
+use tempfile::NamedTempFile;
 
 /// Mihomo release channel for automatic binary fetching.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
@@ -158,12 +159,21 @@ impl Config {
 
     pub fn write(&mut self, path: &Path) -> Result<()> {
         let serialized_config = toml::to_string(&self)?;
-        fs::write(path, serialized_config)?;
+        create_parent_dir(path)?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("config path has no parent: {}", path.display()))?;
+        let mut staged = NamedTempFile::new_in(parent)?;
+        staged.write_all(serialized_config.as_bytes())?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+            staged
+                .as_file()
+                .set_permissions(fs::Permissions::from_mode(0o600))?;
         }
+        staged.as_file().sync_all()?;
+        staged.persist(path).map_err(|error| error.error)?;
         Ok(())
     }
 }
