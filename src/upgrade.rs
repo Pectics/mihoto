@@ -4,16 +4,16 @@ use self_update::cargo_crate_version;
 
 /// Perform the upgrade to the latest version
 pub async fn run_upgrade(no_confirm: bool, target: Option<String>) -> Result<()> {
-    let prefix = "mihoro:";
+    let prefix = "mihoto:";
 
-    println!("{} Checking for mihoro updates...", prefix.cyan());
+    println!("{} Checking for mihoto updates...", prefix.cyan());
 
     let result = tokio::task::spawn_blocking(move || {
         let mut builder = self_update::backends::github::Update::configure();
         builder
-            .repo_owner("spencerwooo")
-            .repo_name("mihoro")
-            .bin_name("mihoro")
+            .repo_owner("Pectics")
+            .repo_name("mihoto")
+            .bin_name("mihoto")
             .show_download_progress(true)
             .show_output(true)
             .no_confirm(no_confirm)
@@ -39,7 +39,7 @@ pub async fn run_upgrade(no_confirm: bool, target: Option<String>) -> Result<()>
                     status.version().to_string().underline().green()
                 );
                 println!(
-                    "{} Please restart mihoro for the new version to take effect",
+                    "{} Please restart mihoto for the new version to take effect",
                     prefix.yellow()
                 );
             } else {
@@ -52,7 +52,7 @@ pub async fn run_upgrade(no_confirm: bool, target: Option<String>) -> Result<()>
         }
         Err(e) if e.to_string().contains("permission") => {
             anyhow::bail!(
-                "Permission denied. Ensure you have write access to the mihoro binary location."
+                "Permission denied. Ensure you have write access to the mihoto binary location."
             );
         }
         Err(e) if e.to_string().contains("network") || e.to_string().contains("connection") => {
@@ -66,14 +66,14 @@ pub async fn run_upgrade(no_confirm: bool, target: Option<String>) -> Result<()>
 
 /// Check if a new version is available without installing
 pub async fn check_for_update() -> Result<Option<String>> {
-    let prefix = "mihoro:";
+    let prefix = "mihoto:";
 
     println!("{} Checking for available updates...", prefix.cyan());
 
     let result = tokio::task::spawn_blocking(move || {
         let releases = self_update::backends::github::ReleaseList::configure()
-            .repo_owner("spencerwooo")
-            .repo_name("mihoro")
+            .repo_owner("Pectics")
+            .repo_name("mihoto")
             .build()?
             .fetch()?;
 

@@ -23,7 +23,7 @@ use truncatable::Truncatable;
 /// Total number of retries attempted on top of the initial request.
 pub const MAX_RETRIES: usize = 3;
 pub const DETAIL_PREFIX: &str = "   ";
-pub const MIHORO_GITHUB_MIRROR_ENV: &str = "MIHORO_GITHUB_MIRROR";
+pub const MIHOTO_GITHUB_MIRROR_ENV: &str = "MIHOTO_GITHUB_MIRROR";
 
 /// Shared retry strategy for HTTP operations.
 ///
@@ -57,7 +57,7 @@ pub fn create_parent_dir(path: &Path) -> Result<()> {
 }
 
 fn github_mirror_base() -> Option<String> {
-    let mirror = std::env::var(MIHORO_GITHUB_MIRROR_ENV).ok()?;
+    let mirror = std::env::var(MIHOTO_GITHUB_MIRROR_ENV).ok()?;
     let mirror = mirror.trim().trim_end_matches('/').to_string();
     if mirror.is_empty() {
         return None;
@@ -398,7 +398,7 @@ mod tests {
     #[test]
     fn test_resolve_download_url_uses_mirror_for_github_downloads() {
         let _guard = env_lock().lock().unwrap();
-        std::env::set_var(MIHORO_GITHUB_MIRROR_ENV, "https://gh-proxy.org/");
+        std::env::set_var(MIHOTO_GITHUB_MIRROR_ENV, "https://gh-proxy.org/");
 
         let resolved = resolve_download_url(
             "https://github.com/MetaCubeX/mihomo/releases/latest/download/version.txt",
@@ -408,24 +408,24 @@ mod tests {
             "https://gh-proxy.org/https://github.com/MetaCubeX/mihomo/releases/latest/download/version.txt"
         );
 
-        std::env::remove_var(MIHORO_GITHUB_MIRROR_ENV);
+        std::env::remove_var(MIHOTO_GITHUB_MIRROR_ENV);
     }
 
     #[test]
     fn test_resolve_download_url_keeps_non_github_urls_and_api_urls() {
         let _guard = env_lock().lock().unwrap();
-        std::env::set_var(MIHORO_GITHUB_MIRROR_ENV, "https://gh-proxy.org");
+        std::env::set_var(MIHOTO_GITHUB_MIRROR_ENV, "https://gh-proxy.org");
 
         assert_eq!(
             resolve_download_url("https://example.com/file.tar.gz").as_ref(),
             "https://example.com/file.tar.gz"
         );
         assert_eq!(
-            resolve_download_url("https://api.github.com/repos/spencerwooo/mihoro/releases/latest")
+            resolve_download_url("https://api.github.com/repos/spencerwooo/mihoto/releases/latest")
                 .as_ref(),
-            "https://api.github.com/repos/spencerwooo/mihoro/releases/latest"
+            "https://api.github.com/repos/spencerwooo/mihoto/releases/latest"
         );
 
-        std::env::remove_var(MIHORO_GITHUB_MIRROR_ENV);
+        std::env::remove_var(MIHOTO_GITHUB_MIRROR_ENV);
     }
 }

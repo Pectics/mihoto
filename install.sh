@@ -44,8 +44,8 @@ main() {
 
   cd "$_tmp_dir" || err "cd: failed to enter directory: $_tmp_dir"
 
-  # Download and extract mihoro.
-  ensure download_mihoro "$_arch"
+  # Download and extract mihoto.
+  ensure download_mihoto "$_arch"
   local _package="$RETVAL"
   assert_nz "$_package" "package"
   echo "Downloaded package: $_package"
@@ -64,22 +64,22 @@ main() {
   esac
 
   # Install binary.
-  local _bin_dir="$HOME/.local/bin"
+  local _bin_dir="/usr/local/bin"
   local _bin_name
-  _bin_name="mihoro"
+  _bin_name="mihoto"
   ensure mkdir -p "$_bin_dir"
   ensure cp "$_bin_name" "$_bin_dir"
-  echo "Installed mihoro to $_bin_dir"
+  echo "Installed mihoto to $_bin_dir"
 
   # Print success message and check $PATH.
   echo ""
-  echo "mihoro is installed!"
+  echo "mihoto is installed!"
   if ! echo ":$PATH:" | grep -Fq ":$_bin_dir:"; then
-    echo "NOTE: $_bin_dir is not on your \$PATH. mihoro will not work unless it is added to \$PATH."
+    echo "NOTE: $_bin_dir is not on your \$PATH. mihoto will not work unless it is added to \$PATH."
   fi
 }
 
-download_mihoro() {
+download_mihoto() {
   local _arch="$1"
 
   if check_cmd curl; then
@@ -91,7 +91,7 @@ download_mihoro() {
   fi
   need_cmd grep
 
-  local _releases_url="https://api.github.com/repos/spencerwooo/mihoro/releases/latest"
+  local _releases_url="https://api.github.com/repos/Pectics/mihoto/releases/latest"
   local _releases
   case "$_dld" in
   curl) _releases="$(curl -sL "$_releases_url")" ||
@@ -102,7 +102,7 @@ download_mihoro() {
 
   local _package_url
   _package_url="$(echo "$_releases" | grep "browser_download_url" | cut -d '"' -f 4 | grep "$_arch")" ||
-    err "mihoro has not yet been packaged for your architecture ($_arch), please file an issue at https://github.com/spencerwooo/mihoro/issues"
+    err "mihoto has not yet been packaged for your architecture ($_arch), please file an issue at https://github.com/Pectics/mihoto/issues"
 
   local _ext
   case "$_package_url" in
@@ -111,7 +111,7 @@ download_mihoro() {
   *) err "unsupported package format: $_package_url" ;;
   esac
 
-  local _package="mihoro.$_ext"
+  local _package="mihoto.$_ext"
 
   # Build download URL with optional mirror prefix
   local _download_url

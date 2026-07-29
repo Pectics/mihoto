@@ -1,5 +1,5 @@
 use crate::config::{load_config, validate_config, write_default_if_missing, Config};
-use crate::mihoro::{BinaryPlan, Mihoro, StageStatus};
+use crate::mihoto::{BinaryPlan, Mihoto, StageStatus};
 
 use std::{future::Future, path::Path};
 
@@ -7,7 +7,6 @@ use anyhow::{bail, Result};
 use colored::Colorize;
 use dialoguer::Input;
 use reqwest::Client;
-use shellexpand::tilde;
 
 pub struct InitOptions {
     pub force: bool,
@@ -60,7 +59,7 @@ impl StageReport {
     }
 
     fn print(&self) {
-        println!("{} {}", "mihoro:".cyan().bold(), "init summary".bold());
+        println!("{} {}", "mihoto:".cyan().bold(), "init summary".bold());
         for (name, status) in &self.entries {
             match status {
                 StageStatus::Installed => {
@@ -131,7 +130,7 @@ fn bootstrap_config(config_path: &str, yes: bool) -> Result<Config> {
     if config.remote_config_url.is_empty() {
         if yes {
             bail!(
-                "`remote_config_url` is not set - edit `{}` or run `mihoro init` interactively",
+                "`remote_config_url` is not set - edit `{}` or run `mihoto init` interactively",
                 config_path
             );
         }
@@ -139,14 +138,14 @@ fn bootstrap_config(config_path: &str, yes: bool) -> Result<Config> {
         if just_created {
             println!(
                 "{} Created default config at {}",
-                "mihoro:".cyan(),
+                "mihoto:".cyan(),
                 config_path.underline().yellow()
             );
         }
-        println!("{} Enter your remote subscription URL:", "mihoro:".yellow());
+        println!("{} Enter your remote subscription URL:", "mihoto:".yellow());
         config.remote_config_url = prompt_subscription_url()?;
         config.write(Path::new(config_path))?;
-        println!("{} Saved", "mihoro:".green());
+        println!("{} Saved", "mihoto:".green());
     }
 
     Ok(config)
@@ -157,14 +156,14 @@ fn bootstrap_config(config_path: &str, yes: bool) -> Result<Config> {
 // ---------------------------------------------------------------------------
 
 pub async fn run(config_path: &str, client: &Client, opts: InitOptions) -> Result<()> {
-    let config_path = tilde(config_path);
+    let config_path = std::borrow::Cow::Borrowed(config_path);
     let config_path = config_path.as_ref();
     let config = bootstrap_config(config_path, opts.yes)?;
     validate_config(&config)?;
 
-    let mihoro = Mihoro::from_config(config.clone());
+    let mihoto = Mihoto::from_config(config.clone());
 
-    println!("{} initializing", "mihoro:".cyan().bold());
+    println!("{} initializing", "mihoto:".cyan().bold());
 
     let force = opts.force;
     let arch = opts.arch.as_deref();
@@ -178,7 +177,7 @@ pub async fn run(config_path: &str, client: &Client, opts: InitOptions) -> Resul
     // swap is deferred to the "install binary" stage after all downloads finish.
 
     report.begin("mihomo binary", Some("downloading mihomo binary"));
-    let binary_temp = match mihoro.prepare_binary(client, force, arch).await {
+    let binary_temp = match mihoto.prepare_binary(client, force, arch).await {
         Ok(BinaryPlan::Install(temp)) => {
             report.record("mihomo binary", StageStatus::Installed);
             Some(temp)
@@ -197,19 +196,19 @@ pub async fn run(config_path: &str, client: &Client, opts: InitOptions) -> Resul
         .run(
             "remote config",
             Some("downloading and merging remote config"),
-            || mihoro.ensure_remote_config(client, force),
+            || mihoto.ensure_remote_config(client, force),
         )
         .await;
     report
         .run("geodata", Some("downloading geodata"), || {
-            mihoro.ensure_geodata(client, force)
+            mihoto.ensure_geodata(client, force)
         })
         .await;
     report
         .run(
             "web dashboard",
             Some("downloading dashboard assets"),
-            || mihoro.ensure_ui(client, force),
+            || mihoto.ensure_ui(client, force),
         )
         .await;
 
@@ -231,7 +230,7 @@ pub async fn run(config_path: &str, client: &Client, opts: InitOptions) -> Resul
         report.begin("install binary", Some("installing mihomo binary"));
         let install_status = match binary_temp {
             None => StageStatus::Skipped("nothing to install".to_string()),
-            Some(temp) => match mihoro.install_binary(temp).await {
+            Some(temp) => match mihoto.install_binary(temp).await {
                 Ok(s) => s,
                 Err(e) => StageStatus::Failed(e),
             },
@@ -242,14 +241,14 @@ pub async fn run(config_path: &str, client: &Client, opts: InitOptions) -> Resul
             .run(
                 "systemd service",
                 Some("writing systemd service"),
-                || async { mihoro.ensure_service().await },
+                || async { mihoto.ensure_service().await },
             )
             .await;
         report
             .run(
                 "service start",
                 Some("starting and enabling mihomo.service"),
-                || async { mihoro.ensure_service_running().await },
+                || async { mihoto.ensure_service_running().await },
             )
             .await;
     }
@@ -270,15 +269,15 @@ pub async fn run(config_path: &str, client: &Client, opts: InitOptions) -> Resul
                 "  Using {} - change via the {} field in {}",
                 ui_name.bold(),
                 "`ui`".bold(),
-                "mihoro.toml".underline()
+                "mihoto.toml".underline()
             );
             if config.mihomo_config.secret.is_some() {
-                println!("  Authentication required (secret is set in mihoro.toml)");
+                println!("  Authentication required (secret is set in mihoto.toml)");
             } else {
                 println!(
                     "  Set {} in {} to require a password",
                     "`mihomo_config.secret`".bold(),
-                    "mihoro.toml".underline()
+                    "mihoto.toml".underline()
                 );
             }
         }

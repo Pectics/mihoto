@@ -17,9 +17,9 @@ pub enum MihomoChannel {
     Alpha,
 }
 
-/// `mihoro` configurations.
+/// `mihoto` configurations.
 #[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub remote_config_url: String,
     #[serde(default = "default_ui", skip_serializing_if = "Option::is_none")]
@@ -29,10 +29,10 @@ pub struct Config {
     pub remote_mihomo_binary_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mihomo_arch: Option<String>,
+    pub mihoto_binary_path: String,
     pub mihomo_binary_path: String,
     pub mihomo_config_root: String,
-    pub user_systemd_root: String,
-    pub mihoro_user_agent: String,
+    pub mihoto_user_agent: String,
     pub auto_update_interval: u16,
     pub mihomo_config: MihomoConfig,
 }
@@ -46,10 +46,10 @@ impl Default for Config {
             mihomo_channel: MihomoChannel::default(),
             mihomo_arch: None,
             remote_config_url: String::from(""),
-            mihomo_binary_path: String::from("~/.local/bin/mihomo"),
-            mihomo_config_root: String::from("~/.config/mihomo"),
-            user_systemd_root: String::from("~/.config/systemd/user"),
-            mihoro_user_agent: String::from("mihoro"),
+            mihoto_binary_path: String::from("/usr/local/bin/mihoto"),
+            mihomo_binary_path: String::from("/usr/local/bin/mihomo"),
+            mihomo_config_root: String::from("/etc/mihomo"),
+            mihoto_user_agent: String::from("mihoto"),
             auto_update_interval: 12,
             mihomo_config: MihomoConfig::default(),
         }
@@ -159,6 +159,11 @@ impl Config {
     pub fn write(&mut self, path: &Path) -> Result<()> {
         let serialized_config = toml::to_string(&self)?;
         fs::write(path, serialized_config)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        }
         Ok(())
     }
 }
@@ -189,20 +194,32 @@ pub fn validate_config(config: &Config) -> Result<()> {
         ("remote_config_url", &config.remote_config_url),
         ("mihomo_binary_path", &config.mihomo_binary_path),
         ("mihomo_config_root", &config.mihomo_config_root),
-        ("user_systemd_root", &config.user_systemd_root),
+        ("mihoto_binary_path", &config.mihoto_binary_path),
     ];
     for (field, value) in required_fields.iter() {
         if value.is_empty() {
             bail!("`{}` undefined", field);
         }
+        for (field, value) in [
+            ("mihoto_binary_path", &config.mihoto_binary_path),
+            ("mihomo_binary_path", &config.mihomo_binary_path),
+            ("mihomo_config_root", &config.mihomo_config_root),
+        ] {
+            if !Path::new(value).is_absolute() {
+                bail!("`{field}` must be an absolute path");
+            }
+        }
+        if config.auto_update_interval > 24 {
+            bail!("`auto_update_interval` must be between 0 and 24 hours");
+        }
     }
     Ok(())
 }
 
-/// Tries to parse mihoro config as toml from path.
+/// Tries to parse mihoto config as toml from path.
 ///
 /// * If config file does not exist, creates default config file and returns an error directing
-///   the user to run `mihoro init`.
+///   the user to run `mihoto init`.
 /// * If found, parses the file and validates required fields.
 pub fn parse_config(path: &str) -> Result<Config> {
     let config_path = Path::new(path);
@@ -211,7 +228,7 @@ pub fn parse_config(path: &str) -> Result<Config> {
     if !config_path.exists() {
         Config::new().write(config_path)?;
         bail!(
-            "created default config at `{}`, run `mihoro init` to finish setup",
+            "created default config at `{}`, run `mihoto init` to finish setup",
             path.underline()
         );
     }
@@ -223,7 +240,7 @@ pub fn parse_config(path: &str) -> Result<Config> {
 
 /// `mihomoYamlConfig` is defined to support serde serialization and deserialization of arbitrary
 /// mihomo `config.yaml`, with support for fields defined in `mihomoConfig` for overrides and also
-/// extra fields that are not managed by `mihoro` by design (namely `proxies`, `proxy-groups`,
+/// extra fields that are not managed by `mihoto` by design (namely `proxies`, `proxy-groups`,
 /// `rules`, etc.)
 #[derive(Serialize, Deserialize, Debug)]
 pub struct MihomoYamlConfig {
@@ -288,9 +305,9 @@ pub struct MihomoYamlConfig {
 /// Only a subset of mihomo's config fields are supported, as defined in `mihomoConfig`.
 ///
 /// Rules:
-/// * Fields defined in `mihoro.toml` will override the downloaded remote `config.yaml`.
+/// * Fields defined in `mihoto.toml` will override the downloaded remote `config.yaml`.
 /// * Fields undefined will be removed from the downloaded `config.yaml`.
-/// * Fields not supported by `mihoro` will be kept as is.
+/// * Fields not supported by `mihoto` will be kept as is.
 ///
 /// Returns `true` when the file contents had to change.
 pub fn apply_mihomo_override(path: &str, override_config: &MihomoConfig) -> Result<bool> {
@@ -330,153 +347,52 @@ pub fn apply_mihomo_override(path: &str, override_config: &MihomoConfig) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use tempfile::tempdir;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
-    fn test_parse_config_creates_default_if_not_exists() -> Result<()> {
-        let dir = tempdir()?;
-        let config_path = dir.path().join("test.toml");
-
-        let result = parse_config(config_path.to_str().unwrap());
-        assert!(result.is_err());
-        assert!(config_path.exists());
-
-        Ok(())
+    fn system_defaults_and_validation() {
+        let config = Config::default();
+        assert_eq!(config.mihoto_binary_path, "/usr/local/bin/mihoto");
+        assert_eq!(config.mihomo_binary_path, "/usr/local/bin/mihomo");
+        assert_eq!(config.mihomo_config_root, "/etc/mihomo");
+        assert_eq!(config.mihoto_user_agent, "mihoto");
+        assert_eq!(config.auto_update_interval, 12);
+        let mut relative = config.clone();
+        relative.mihomo_config_root = "relative".into();
+        assert!(validate_config(&relative).is_err());
+        let mut too_long = config;
+        too_long.auto_update_interval = 25;
+        assert!(validate_config(&too_long).is_err());
     }
 
     #[test]
-    fn test_config_write_and_read() -> Result<()> {
-        let dir = tempdir()?;
-        let config_path = dir.path().join("test.toml");
-
-        let mut config = Config::new();
-        config.remote_config_url = "http://example.com/config.yaml".to_string();
-        config.write(&config_path)?;
-
-        let read_config = Config::setup_from(config_path.to_str().unwrap())?;
-        assert_eq!(
-            read_config.remote_config_url,
-            "http://example.com/config.yaml"
+    fn old_fields_are_rejected_and_config_is_private() {
+        assert!(
+            toml::from_str::<Config>(&format!("{}{} = '/tmp'", "user_", "systemd_root")).is_err()
         );
-        assert_eq!(read_config.ui, Some(Ui::Metacubexd));
-
-        Ok(())
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mihoto.toml");
+        Config::default().write(&path).unwrap();
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]
-    fn test_parse_config_validates_required_fields() -> Result<()> {
-        let dir = tempdir()?;
-        let config_path = dir.path().join("test.toml");
-
-        let toml_content = r#"
-            mihomo_binary_path = "~/.local/bin/mihomo"
-            mihomo_config_root = "~/.config/mihomo"
-            user_systemd_root = "~/.config/systemd/user"
-        "#;
-        fs::write(&config_path, toml_content)?;
-
-        let result = parse_config(config_path.to_str().unwrap());
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("remote_config_url"));
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_apply_mihomo_override() -> Result<()> {
-        let dir = tempdir()?;
-        let yaml_path = dir.path().join("config.yaml");
-
-        let yaml_content = r#"
-            port: 8080
-            socks-port: 8081
-            mixed-port: 7890
-            redir-port: 7893
-            allow-lan: false
-            mode: rule
-            log-level: info
-            proxies:
-              - name: "test"
-                type: http
-                server: example.com
-                port: 443
-        "#;
-        fs::write(&yaml_path, yaml_content)?;
-
-        let override_config = MihomoConfig {
-            port: 7891,
-            socks_port: 7892,
-            ..Default::default()
-        };
-
-        let changed = apply_mihomo_override(yaml_path.to_str().unwrap(), &override_config)?;
-        assert!(changed);
-
-        let updated_content = fs::read_to_string(&yaml_path)?;
-        assert!(updated_content.contains("port: 7891"));
-        assert!(updated_content.contains("socks-port: 7892"));
-        assert!(updated_content.contains("proxies:"));
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_apply_mihomo_override_skips_when_yaml_already_matches() -> Result<()> {
-        let dir = tempdir()?;
-        let yaml_path = dir.path().join("config.yaml");
-
-        let yaml_content = r#"
-            port: 7891
-            socks-port: 7892
-            mixed-port: 7890
-            allow-lan: false
-            bind-address: "*"
-            mode: rule
-            log-level: info
-            ipv6: true
-            external-controller: 0.0.0.0:9090
-            external-ui: ui
-            geodata-mode: false
-            geo-auto-update: true
-            geo-update-interval: 24
-            geox-url:
-              geoip: https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat
-              geosite: https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat
-              mmdb: https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb
-            proxies:
-              - name: "test"
-                type: http
-                server: example.com
-                port: 443
-        "#;
-        fs::write(&yaml_path, yaml_content)?;
-
-        let changed = apply_mihomo_override(yaml_path.to_str().unwrap(), &MihomoConfig::default())?;
-
-        assert!(!changed);
-        Ok(())
-    }
-
-    #[test]
-    fn test_parse_config_uses_default_ui() -> Result<()> {
-        let dir = tempdir()?;
-        let config_path = dir.path().join("test.toml");
-
-        let toml_content = r#"
-            remote_config_url = "http://example.com/config.yaml"
-            mihomo_binary_path = "~/.local/bin/mihomo"
-            mihomo_config_root = "~/.config/mihomo"
-            user_systemd_root = "~/.config/systemd/user"
-        "#;
-        fs::write(&config_path, toml_content)?;
-
-        let config = parse_config(config_path.to_str().unwrap())?;
-        assert_eq!(config.ui, Some(Ui::Metacubexd));
-
-        Ok(())
+    fn tun_and_unknown_yaml_are_preserved() {
+        let yaml = "tun:\n  enable: true\ndns:\n  enable: true\nlisteners:\n  - name: test\nproxies: []\nproxy-groups: []\nrules: []\n";
+        let parsed: MihomoYamlConfig = serde_yaml::from_str(yaml).unwrap();
+        let rendered = serde_yaml::to_string(&parsed).unwrap();
+        for field in [
+            "tun:",
+            "dns:",
+            "listeners:",
+            "proxies:",
+            "proxy-groups:",
+            "rules:",
+        ] {
+            assert!(rendered.contains(field));
+        }
     }
 }

@@ -1,0 +1,14 @@
+name: systemd and TUN integration
+on: workflow_dispatch
+jobs:
+  integration:
+    name: systemd, TUN, and firewall integration
+    runs-on: [self-hosted, linux, systemd, tun]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - name: systemd integration
+        run: sudo env MIHOTO_SYSTEMD_INTEGRATION=1 MIHOTO_ALLOW_SYSTEMD_MUTATION=1 scripts/test-systemd-integration.sh
+      - name: TUN and firewall integration
+        run: sudo scripts/test-tun-integration.sh

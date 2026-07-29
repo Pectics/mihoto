@@ -241,7 +241,7 @@ pub async fn resolve_binary(
         format!("linux-{}", arch).bold()
     );
 
-    let version = fetch_latest_version(client, channel, &config.mihoro_user_agent).await?;
+    let version = fetch_latest_version(client, channel, &config.mihoto_user_agent).await?;
 
     println!(
         "{} Found mihomo version: {}",

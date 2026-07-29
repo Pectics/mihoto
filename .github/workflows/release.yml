@@ -47,19 +47,19 @@ jobs:
           use-cross: ${{ matrix.cross }}
 
       - name: Strip binaries
-        run: strip target/${{ matrix.target }}/release/mihoro
+        run: strip target/${{ matrix.target }}/release/mihoto
         if: ${{ matrix.strip }}
 
       - name: Package binaries
         run: |
           cd target/${{ matrix.target }}/release
-          tar -czvf mihoro-${{ github.ref_name }}-${{ matrix.target }}.tar.gz mihoro
+          tar -czvf mihoto-${{ github.ref_name }}-${{ matrix.target }}.tar.gz mihoto
           cd -
 
       - name: Upload binaries to release
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: target/${{ matrix.target }}/release/mihoro-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
-          asset_name: mihoro-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+          file: target/${{ matrix.target }}/release/mihoto-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+          asset_name: mihoto-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
           tag: ${{ github.ref }}

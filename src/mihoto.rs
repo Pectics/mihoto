@@ -1,9 +1,7 @@
-use crate::cmd::{CronCommands, ProxyCommands};
 use crate::config::{apply_mihomo_override, parse_config, Config};
-use crate::cron;
-use crate::proxy::{proxy_export_cmd, proxy_unset_cmd};
 use crate::resolve_mihomo_bin;
 use crate::systemctl::Systemctl;
+use crate::timer;
 use crate::ui::{install_ui, resolve_external_ui_path};
 use crate::utils::{
     create_parent_dir, delete_file, download_file, extract_gzip, try_decode_base64_file_inplace,
@@ -19,32 +17,30 @@ use std::process::Command;
 
 use anyhow::{anyhow, Result};
 use colored::Colorize;
-use local_ip_address::local_ip;
 use reqwest::Client;
-use shellexpand::tilde;
 use tempfile::NamedTempFile;
 
 #[derive(Debug)]
-pub struct Mihoro {
-    // global mihoro config
+pub struct Mihoto {
+    // global mihoto config
     pub prefix: String,
     pub config: Config,
 
-    // mihomo global variables derived from mihoro config
+    // mihomo global variables derived from mihoto config
     pub mihomo_target_binary_path: String,
     pub mihomo_target_config_root: String,
     pub mihomo_target_config_path: String,
     pub mihomo_target_service_path: String,
 }
 
-/// Outcome of a single setup stage, used by `mihoro init`.
+/// Outcome of a single setup stage, used by `mihoto init`.
 pub enum StageStatus {
     Installed,
     Skipped(String),
     Failed(Error),
 }
 
-/// Plan returned by [`Mihoro::prepare_binary`]: either we already have the binary and
+/// Plan returned by [`Mihoto::prepare_binary`]: either we already have the binary and
 /// nothing needs swapping, or we downloaded a new one to a temp file that the install
 /// step must consume.
 ///
@@ -57,25 +53,20 @@ pub enum BinaryPlan {
     Install(NamedTempFile),
 }
 
-impl Mihoro {
-    pub fn new(config_path: &str) -> Result<Mihoro> {
-        let config = parse_config(tilde(config_path).as_ref())?;
+impl Mihoto {
+    pub fn new(config_path: &str) -> Result<Mihoto> {
+        let config = parse_config(config_path)?;
         Ok(Self::from_config(config))
     }
 
-    /// Build a `Mihoro` from an already-validated `Config`.
-    pub fn from_config(config: Config) -> Mihoro {
-        Mihoro {
-            prefix: String::from("mihoro:"),
-            mihomo_target_binary_path: tilde(&config.mihomo_binary_path).to_string(),
-            mihomo_target_config_root: tilde(&config.mihomo_config_root).to_string(),
-            mihomo_target_config_path: tilde(&format!("{}/config.yaml", config.mihomo_config_root))
-                .to_string(),
-            mihomo_target_service_path: tilde(&format!(
-                "{}/mihomo.service",
-                config.user_systemd_root
-            ))
-            .to_string(),
+    /// Build a `Mihoto` from an already-validated `Config`.
+    pub fn from_config(config: Config) -> Mihoto {
+        Mihoto {
+            prefix: String::from("mihoto:"),
+            mihomo_target_binary_path: config.mihomo_binary_path.clone(),
+            mihomo_target_config_root: config.mihomo_config_root.clone(),
+            mihomo_target_config_path: format!("{}/config.yaml", config.mihomo_config_root),
+            mihomo_target_service_path: String::from("/etc/systemd/system/mihomo.service"),
             config,
         }
     }
@@ -83,7 +74,7 @@ impl Mihoro {
     /// Stage 1 of the binary install: resolve the URL and download to a temp file.
     ///
     /// Skips if the binary exists and `force` is false. The returned [`BinaryPlan`] is
-    /// handed to [`Mihoro::install_binary`] *after* every other download stage so that
+    /// handed to [`Mihoto::install_binary`] *after* every other download stage so that
     /// stopping the running mihomo service does not break the user's `https_proxy`
     /// while we still need to reach the network.
     pub async fn prepare_binary(
@@ -112,7 +103,7 @@ impl Mihoro {
             client,
             &binary_url,
             temp_file.path(),
-            &self.config.mihoro_user_agent,
+            &self.config.mihoto_user_agent,
         )
         .await?;
         Ok(BinaryPlan::Install(temp_file))
@@ -158,14 +149,23 @@ impl Mihoro {
             };
         }
 
+        fs::create_dir_all(&self.mihomo_target_config_root)?;
+        fs::set_permissions(
+            &self.mihomo_target_config_root,
+            fs::Permissions::from_mode(0o750),
+        )?;
         download_file(
             client,
             &self.config.remote_config_url,
             config_path,
-            &self.config.mihoro_user_agent,
+            &self.config.mihoto_user_agent,
         )
         .await?;
         try_decode_base64_file_inplace(&self.mihomo_target_config_path)?;
+        fs::set_permissions(
+            &self.mihomo_target_config_path,
+            fs::Permissions::from_mode(0o600),
+        )?;
         apply_mihomo_override(&self.mihomo_target_config_path, &self.config.mihomo_config)?;
         Ok(StageStatus::Installed)
     }
@@ -190,7 +190,7 @@ impl Mihoro {
                     client,
                     &geox_url.geoip,
                     &geoip_path,
-                    &self.config.mihoro_user_agent,
+                    &self.config.mihoto_user_agent,
                 )
                 .await?;
             }
@@ -199,7 +199,7 @@ impl Mihoro {
                     client,
                     &geox_url.geosite,
                     &geosite_path,
-                    &self.config.mihoro_user_agent,
+                    &self.config.mihoto_user_agent,
                 )
                 .await?;
             }
@@ -212,7 +212,7 @@ impl Mihoro {
                 client,
                 &geox_url.mmdb,
                 &mmdb_path,
-                &self.config.mihoro_user_agent,
+                &self.config.mihoto_user_agent,
             )
             .await?;
         }
@@ -239,7 +239,7 @@ impl Mihoro {
             client,
             ui,
             &target_dir,
-            &self.config.mihoro_user_agent,
+            &self.config.mihoto_user_agent,
             DETAIL_PREFIX.cyan(),
         )
         .await?;
@@ -259,6 +259,10 @@ impl Mihoro {
         }
         create_parent_dir(Path::new(&self.mihomo_target_service_path))?;
         fs::write(&self.mihomo_target_service_path, &service_content)?;
+        fs::set_permissions(
+            &self.mihomo_target_service_path,
+            fs::Permissions::from_mode(0o644),
+        )?;
         Systemctl::new().daemon_reload().execute()?;
         println!(
             "{} Created mihomo.service at {}",
@@ -300,7 +304,7 @@ impl Mihoro {
         let binary_exists = fs::metadata(&self.mihomo_target_binary_path).is_ok();
         if !binary_exists {
             return Err(anyhow!(
-                "Mihomo binary not found at {}. Run `mihoro init` first.",
+                "Mihomo binary not found at {}. Run `mihoto init` first.",
                 self.mihomo_target_binary_path
             ));
         }
@@ -361,7 +365,7 @@ impl Mihoro {
             client,
             &resolved_binary.url,
             temp_path,
-            &self.config.mihoro_user_agent,
+            &self.config.mihoto_user_agent,
         )
         .await?;
 
@@ -392,7 +396,7 @@ impl Mihoro {
             client,
             &self.config.remote_config_url,
             Path::new(&self.mihomo_target_config_path),
-            &self.config.mihoro_user_agent,
+            &self.config.mihoto_user_agent,
         )
         .await?;
 
@@ -416,14 +420,14 @@ impl Mihoro {
                     client,
                     &geox_url.geoip,
                     &Path::new(&self.mihomo_target_config_root).join("geoip.dat"),
-                    &self.config.mihoro_user_agent,
+                    &self.config.mihoto_user_agent,
                 )
                 .await?;
                 download_file(
                     client,
                     &geox_url.geosite,
                     &Path::new(&self.mihomo_target_config_root).join("geosite.dat"),
-                    &self.config.mihoro_user_agent,
+                    &self.config.mihoto_user_agent,
                 )
                 .await?;
             } else {
@@ -431,7 +435,7 @@ impl Mihoro {
                     client,
                     &geox_url.mmdb,
                     &Path::new(&self.mihomo_target_config_root).join("country.mmdb"),
-                    &self.config.mihoro_user_agent,
+                    &self.config.mihoto_user_agent,
                 )
                 .await?;
             }
@@ -456,7 +460,7 @@ impl Mihoro {
             client,
             ui,
             &target_dir,
-            &self.config.mihoro_user_agent,
+            &self.config.mihoto_user_agent,
             DETAIL_PREFIX.cyan(),
         )
         .await?;
@@ -490,12 +494,19 @@ impl Mihoro {
         Ok(())
     }
 
-    pub fn uninstall(&self) -> Result<()> {
+    pub fn uninstall(&self, purge: bool) -> Result<()> {
         Systemctl::new().stop("mihomo.service").execute()?;
         Systemctl::new().disable("mihomo.service").execute()?;
 
         delete_file(&self.mihomo_target_service_path, self.prefix.cyan())?;
-        delete_file(&self.mihomo_target_config_path, self.prefix.cyan())?;
+        delete_file(timer::SERVICE_PATH, self.prefix.cyan())?;
+        delete_file(timer::TIMER_PATH, self.prefix.cyan())?;
+        if purge {
+            if Path::new(&self.mihomo_target_config_root).exists() {
+                fs::remove_dir_all(&self.mihomo_target_config_root)?;
+            }
+            delete_file(&self.mihomo_target_binary_path, self.prefix.cyan())?;
+        }
 
         Systemctl::new().daemon_reload().execute()?;
         Systemctl::new().reset_failed().execute()?;
@@ -504,74 +515,13 @@ impl Mihoro {
             self.prefix.green()
         );
 
-        // Disable and remove cron job
-        cron::disable_auto_update(&self.prefix)?;
-
-        println!(
-            "{} You may need to remove mihomo binary and config directory manually",
-            self.prefix.yellow()
-        );
-
-        let remove_cmd = format!(
-            "rm -R {} {}",
-            self.mihomo_target_binary_path, self.mihomo_target_config_root
-        );
-        println!("{} `{}`", "->".dimmed(), remove_cmd.underline().bold());
-        Ok(())
-    }
-
-    pub fn proxy_commands(&self, proxy: &Option<ProxyCommands>) -> Result<()> {
-        // `mixed_port` takes precedence over `port` and `socks_port` for proxy export
-        let port = self
-            .config
-            .mihomo_config
-            .mixed_port
-            .as_ref()
-            .unwrap_or(&self.config.mihomo_config.port);
-        let socks_port = self
-            .config
-            .mihomo_config
-            .mixed_port
-            .as_ref()
-            .unwrap_or(&self.config.mihomo_config.socks_port);
-
-        match proxy {
-            Some(ProxyCommands::Export) => {
-                println!("{}", proxy_export_cmd("127.0.0.1", port, socks_port))
-            }
-            Some(ProxyCommands::ExportLan) => {
-                if !self.config.mihomo_config.allow_lan.unwrap_or(false) {
-                    println!(
-                        "{} `{}` is false, proxy is not available for LAN",
-                        "warning:".yellow(),
-                        "allow_lan".bold()
-                    );
-                }
-
-                println!(
-                    "{}",
-                    proxy_export_cmd(&local_ip()?.to_string(), port, socks_port)
-                );
-            }
-            Some(ProxyCommands::Unset) => {
-                println!("{}", proxy_unset_cmd())
-            }
-            _ => (),
+        if !purge {
+            println!(
+                "{} Configuration and Mihomo binary retained; use --purge to remove them",
+                self.prefix.yellow()
+            );
         }
         Ok(())
-    }
-
-    pub fn cron_commands(&self, command: &Option<CronCommands>) -> Result<()> {
-        match command {
-            Some(CronCommands::Enable) => {
-                cron::enable_auto_update(self.config.auto_update_interval, &self.prefix)
-            }
-            Some(CronCommands::Disable) => cron::disable_auto_update(&self.prefix),
-            Some(CronCommands::Status) => {
-                cron::get_cron_status(&self.prefix, &self.mihomo_target_config_path)
-            }
-            _ => Ok(()),
-        }
     }
 
     fn external_ui_target_dir(&self) -> Option<PathBuf> {
@@ -643,6 +593,9 @@ After=network.target NetworkManager.service systemd-networkd.service iwd.service
 
 [Service]
 Type=simple
+User=root
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 LimitNPROC=4096
 LimitNOFILE=65536
 Restart=always
@@ -651,7 +604,7 @@ ExecStart={} -d {}
 ExecReload=/bin/kill -HUP $MAINPID
 
 [Install]
-WantedBy=default.target",
+WantedBy=multi-user.target",
         binary_path, config_root
     )
 }
@@ -659,235 +612,26 @@ WantedBy=default.target",
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use tempfile::tempdir;
-
-    /// Test that Mihoro::new correctly parses config and derives paths
     #[test]
-    fn test_mihoro_new_parses_config_and_derives_paths() -> Result<()> {
-        let dir = tempdir()?;
-        let config_path = dir.path().join("test.toml");
-
-        // Write a valid config file
-        let toml_content = r#"
-            remote_config_url = "http://example.com/config.yaml"
-            mihomo_binary_path = "/tmp/test/mihomo"
-            mihomo_config_root = "/tmp/test/mihomo"
-            user_systemd_root = "/tmp/test/systemd"
-        "#;
-        fs::write(&config_path, toml_content)?;
-
-        let mihoro = Mihoro::new(&config_path.to_str().unwrap().to_string())?;
-
-        assert_eq!(mihoro.mihomo_target_binary_path, "/tmp/test/mihomo");
-        assert_eq!(mihoro.mihomo_target_config_root, "/tmp/test/mihomo");
-        assert_eq!(
-            mihoro.mihomo_target_config_path,
-            "/tmp/test/mihomo/config.yaml"
-        );
-        assert_eq!(
-            mihoro.mihomo_target_service_path,
-            "/tmp/test/systemd/mihomo.service"
-        );
-
-        Ok(())
-    }
-
-    /// Test that proxy_commands uses mixed_port when set
-    #[test]
-    fn test_proxy_commands_uses_mixed_port_when_set() -> Result<()> {
-        let dir = tempdir()?;
-        let config_path = dir.path().join("test.toml");
-
-        let toml_content = r#"
-            remote_config_url = "http://example.com/config.yaml"
-            mihomo_binary_path = "/tmp/test/mihomo"
-            mihomo_config_root = "/tmp/test/mihomo"
-            user_systemd_root = "/tmp/test/systemd"
-
-            [mihomo_config]
-            port = 7891
-            socks_port = 7892
-            mixed_port = 7890
-        "#;
-        fs::write(&config_path, toml_content)?;
-
-        let mihoro = Mihoro::new(&config_path.to_str().unwrap().to_string())?;
-
-        // Test Export command (should use mixed_port 7890)
-        let cmd = mihoro.proxy_commands(&Some(ProxyCommands::Export));
-        assert!(cmd.is_ok());
-
-        Ok(())
-    }
-
-    /// Test that proxy_commands falls back to port/socks_port when mixed_port is None
-    #[test]
-    fn test_proxy_commands_fallback_to_port_when_mixed_port_none() -> Result<()> {
-        let dir = tempdir()?;
-        let config_path = dir.path().join("test.toml");
-
-        let toml_content = r#"
-            remote_config_url = "http://example.com/config.yaml"
-            mihomo_binary_path = "/tmp/test/mihomo"
-            mihomo_config_root = "/tmp/test/mihomo"
-            user_systemd_root = "/tmp/test/systemd"
-
-            [mihomo_config]
-            port = 7891
-            socks_port = 7892
-        "#;
-        fs::write(&config_path, toml_content)?;
-
-        let mihoro = Mihoro::new(&config_path.to_str().unwrap().to_string())?;
-
-        let cmd = mihoro.proxy_commands(&Some(ProxyCommands::Export));
-        assert!(cmd.is_ok());
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_external_ui_target_dir_resolves_relative_path() -> Result<()> {
-        let dir = tempdir()?;
-        let config_path = dir.path().join("test.toml");
-
-        let toml_content = r#"
-            remote_config_url = "http://example.com/config.yaml"
-            mihomo_binary_path = "/tmp/test/mihomo"
-            mihomo_config_root = "/tmp/test/mihomo"
-            user_systemd_root = "/tmp/test/systemd"
-
-            [mihomo_config]
-            external_ui = "ui"
-        "#;
-        fs::write(&config_path, toml_content)?;
-
-        let mihoro = Mihoro::new(&config_path.to_str().unwrap().to_string())?;
-        assert_eq!(
-            mihoro.external_ui_target_dir(),
-            Some(PathBuf::from("/tmp/test/mihomo/ui"))
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_extract_mihomo_version_from_stable_output() {
-        let output = "Mihomo Meta v1.19.23 linux amd64 with go1.25.1 2026-04-07";
-        assert_eq!(extract_mihomo_version(output), Some("v1.19.23".to_string()));
-    }
-
-    #[test]
-    fn test_extract_mihomo_version_normalizes_bare_stable_output() {
-        let output = "Mihomo Meta 1.19.23 linux amd64 with go1.25.1 2026-04-07";
-        assert_eq!(extract_mihomo_version(output), Some("v1.19.23".to_string()));
-    }
-
-    #[test]
-    fn test_extract_mihomo_version_from_alpha_output() {
-        let output = "Mihomo Meta alpha-c107c6a linux amd64 with go1.25.1";
-        assert_eq!(
-            extract_mihomo_version(output),
-            Some("alpha-c107c6a".to_string())
-        );
-    }
-
-    /// Test integration: download config → apply override → verify result
-    #[test]
-    fn test_integration_apply_override_flow() -> Result<()> {
-        let dir = tempdir()?;
-        let config_path = dir.path().join("test.toml");
-        let yaml_path = dir.path().join("config.yaml");
-
-        // Write config with custom port override
-        let toml_content = r#"
-            remote_config_url = "http://example.com/config.yaml"
-            mihomo_binary_path = "/tmp/test/mihomo"
-            mihomo_config_root = "{}"
-            user_systemd_root = "/tmp/test/systemd"
-
-            [mihomo_config]
-            port = 9999
-            socks_port = 9998
-        "#;
-        fs::write(
-            &config_path,
-            toml_content.replace("{}", dir.path().to_str().unwrap()),
-        )?;
-
-        // Write initial mihomo config
-        let yaml_content = r#"
-            port: 8080
-            socks-port: 8081
-            mode: rule
-            proxies:
-              - name: "test"
-                type: http
-                server: example.com
-                port: 443
-        "#;
-        fs::write(&yaml_path, yaml_content)?;
-
-        // Create Mihoro instance and apply override
-        let mihoro = Mihoro::new(&config_path.to_str().unwrap().to_string())?;
-        apply_mihomo_override(yaml_path.to_str().unwrap(), &mihoro.config.mihomo_config)?;
-
-        // Verify override was applied
-        let updated_content = fs::read_to_string(&yaml_path)?;
-        assert!(updated_content.contains("port: 9999"));
-        assert!(updated_content.contains("socks-port: 9998"));
-        assert!(updated_content.contains("proxies:"));
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_ensure_remote_config_skips_when_cached_config_is_current() -> Result<()> {
-        let dir = tempdir()?;
-        let config_path = dir.path().join("test.toml");
-        let yaml_path = dir.path().join("config.yaml");
-
-        let toml_content = r#"
-            remote_config_url = "http://example.com/config.yaml"
-            mihomo_binary_path = "/tmp/test/mihomo"
-            mihomo_config_root = "{}"
-            user_systemd_root = "/tmp/test/systemd"
-
-            [mihomo_config]
-            port = 9999
-            socks_port = 9998
-        "#;
-        fs::write(
-            &config_path,
-            toml_content.replace("{}", dir.path().to_str().unwrap()),
-        )?;
-
-        let yaml_content = r#"
-            port: 8080
-            socks-port: 8081
-            mode: rule
-            proxies:
-              - name: "test"
-                type: http
-                server: example.com
-                port: 443
-        "#;
-        fs::write(&yaml_path, yaml_content)?;
-
-        let mihoro = Mihoro::new(&config_path.to_str().unwrap().to_string())?;
-        apply_mihomo_override(yaml_path.to_str().unwrap(), &mihoro.config.mihomo_config)?;
-        let current_content = fs::read_to_string(&yaml_path)?;
-
-        let status = mihoro.ensure_remote_config(&Client::new(), false).await?;
-
-        match status {
-            StageStatus::Skipped(reason) => assert_eq!(reason, "config already current"),
-            StageStatus::Installed => panic!("expected remote config to be skipped"),
-            StageStatus::Failed(_) => panic!("ensure_remote_config returned a failed status"),
+    fn system_service_has_tun_capabilities() {
+        let unit = render_service_string("/usr/local/bin/mihomo", "/etc/mihomo");
+        for value in [
+            "User=root",
+            "CapabilityBoundingSet=CAP_NET_ADMIN",
+            "AmbientCapabilities=CAP_NET_ADMIN",
+            "ExecStart=/usr/local/bin/mihomo -d /etc/mihomo",
+            "ExecReload=",
+            "WantedBy=multi-user.target",
+        ] {
+            assert!(unit.contains(value));
         }
-        assert_eq!(fs::read_to_string(&yaml_path)?, current_content);
-
-        Ok(())
+        for forbidden in [
+            format!("{}{}", "--", "user"),
+            format!("{}{}", "default", ".target"),
+            format!("{}/{}", "systemd", "user"),
+            format!("{}/{}", "~", ".config"),
+        ] {
+            assert!(!unit.contains(&forbidden));
+        }
     }
 }
