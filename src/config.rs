@@ -416,4 +416,39 @@ mod tests {
             assert!(rendered.contains(field));
         }
     }
+
+    #[test]
+    fn parse_config_does_not_create_a_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.toml");
+        let error = parse_config(path.to_str().unwrap()).unwrap_err();
+        assert!(error.to_string().contains("does not exist"));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn manager_config_path_must_be_absolute() {
+        assert!(validate_manager_config_path(Path::new("/etc/mihoto.toml")).is_ok());
+        assert!(validate_manager_config_path(Path::new("mihoto.toml")).is_err());
+        assert!(validate_manager_config_path(Path::new("")).is_err());
+    }
+
+    #[test]
+    fn applying_overrides_preserves_tun_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(
+			&path,
+			"tun:\n  enable: true\n  stack: system\n  device: mihoto-test\nrules:\n  - MATCH,DIRECT\n",
+		)
+		.unwrap();
+
+        apply_mihomo_override(path.to_str().unwrap(), &MihomoConfig::default()).unwrap();
+        let value: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(value["tun"]["enable"], true);
+        assert_eq!(value["tun"]["stack"], "system");
+        assert_eq!(value["tun"]["device"], "mihoto-test");
+        assert_eq!(value["rules"][0], "MATCH,DIRECT");
+    }
 }
