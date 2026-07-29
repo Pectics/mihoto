@@ -103,13 +103,8 @@ fn command_requires_root(command: &Commands) -> bool {
 }
 
 fn running_as_root() -> bool {
-    Command::new("id")
-        .arg("-u")
-        .output()
-        .ok()
-        .is_some_and(|output| {
-            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "0"
-        })
+    // SAFETY: `geteuid` has no preconditions and does not dereference pointers.
+    unsafe { libc::geteuid() == 0 }
 }
 
 #[tokio::main]

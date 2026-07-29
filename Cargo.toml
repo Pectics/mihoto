@@ -39,6 +39,7 @@ anyhow = "1.0"
 base64 = "0.22"
 tempfile = "3.18"
 tar = "0.4"
+libc = "0.2"
 dialoguer = { version = "0.11", default-features = false }
 self_update = { version = "0.42", default-features = false, features = [
     "archive-tar",
