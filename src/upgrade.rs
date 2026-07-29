@@ -89,3 +89,52 @@ pub async fn check_for_update() -> Result<Option<String>> {
 
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn release(tag_name: &str, prerelease: bool, draft: bool) -> Release {
+        Release {
+            tag_name: tag_name.to_string(),
+            prerelease,
+            draft,
+            assets: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn release_versions_normalize_v_prefix_and_preserve_prereleases() {
+        assert_eq!(parse_release_version("v1.0.0").unwrap().to_string(), "1.0.0");
+        assert_eq!(
+            parse_release_version("1.0.0-rc.1").unwrap().to_string(),
+            "1.0.0-rc.1"
+        );
+        assert!(parse_release_version("latest").is_err());
+    }
+
+    #[test]
+    fn latest_stable_ignores_drafts_and_release_candidates() {
+        let releases = vec![
+            release("v1.1.0-rc.1", true, false),
+            release("v1.0.1", false, false),
+            release("v1.2.0", false, true),
+            release("v1.0.0", false, false),
+        ];
+
+        assert_eq!(latest_stable(&releases).unwrap().tag_name, "v1.0.1");
+    }
+
+    #[test]
+    fn checksum_lookup_requires_one_exact_asset_match() {
+        let sums = concat!(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  mihoto-v1.0.0-x86_64-unknown-linux-gnu.tar.gz\n",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  mihoto-v1.0.0-aarch64-unknown-linux-gnu.tar.gz\n",
+        );
+        assert_eq!(
+            checksum_for_asset(sums, "mihoto-v1.0.0-x86_64-unknown-linux-gnu.tar.gz").unwrap(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert!(checksum_for_asset(sums, "mihoto-v1.0.0").is_err());
+    }
+}
