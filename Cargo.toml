@@ -46,3 +46,5 @@ self_update = { version = "0.42", default-features = false, features = [
     "compression-flate2",
     "rustls",
 ], optional = true }
+semver = "1.0"
+sha2 = "0.10"
