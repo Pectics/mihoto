@@ -17,7 +17,7 @@ The installer places `mihoto` at `/usr/local/bin/mihoto`. The default manager co
 init, update, apply
 start, status, stop, restart, log
 timer enable|disable|status
-uninstall [--purge]
+uninstall [--purge --yes]
 completions, upgrade
 ```
 
@@ -25,7 +25,7 @@ State-changing commands require explicit root execution, normally with `sudo`. R
 
 ## TUN and systemd
 
-`mihomo.service` is installed to `/etc/systemd/system/mihomo.service`, runs as root, and receives `CAP_NET_ADMIN` and `CAP_NET_RAW`. Unknown subscription YAML fields—including `tun`, `dns`, listeners, proxies, groups, and rules—are preserved when local overrides are applied.
+`mihomo.service` is installed to `/etc/systemd/system/mihomo.service`, runs as root, and receives `CAP_NET_ADMIN` and `CAP_NET_RAW`. The default controller listens on `127.0.0.1:9090`. Binding it to a non-loopback address should be an explicit choice and should be paired with a secret. Unknown subscription YAML fields—including `tun`, `dns`, listeners, proxies, groups, and rules—are preserved when local overrides are applied.
 
 Automatic updates use `/etc/systemd/system/mihoto-update.service` and `mihoto-update.timer`. `auto_update_interval` accepts 0 through 24; zero disables timer installation.
 
@@ -39,8 +39,8 @@ cargo test --all-targets
 scripts/check-system-scope.sh
 ```
 
-Real systemd/TUN acceptance is intentionally opt-in and must run in an isolated, rootful Linux VM. See `scripts/test-systemd-integration.sh`, `scripts/test-tun-integration.sh`, and the manual `systemd-integration` workflow.
+Real systemd/TUN acceptance is intentionally opt-in and should run on a dedicated, rootful Linux host. Both scripts create and remove files under `/etc`, `/usr/local/bin`, and `/etc/systemd/system`, and refuse to overwrite an existing mihoto installation. `test-tun-integration.sh` additionally requires `MIHOTO_REAL_MIHOMO` to identify a pinned real Mihomo binary. Its automatic-route/firewall check is restricted to the benchmarking range `198.18.0.0/15`; it snapshots and verifies restoration of routes and policy rules. The self-hosted workflow expects the pinned fixture at `/usr/local/libexec/mihoto-test/mihomo` and fails before mutation when it is absent. Missing prerequisites are reported as blocked with a non-zero exit status; they are never treated as a passing test.
 
 ## Migration from versions before 0.15
 
-Old per-user installations are not migrated automatically. Back up any old user configuration and disable the old user service manually before initializing 0.15. The removed setup, shell-export, and user-scheduler interfaces are intentionally not accepted by the new CLI.
+Old per-user installations are not migrated automatically. Back up any old user configuration and disable the old user service manually before initializing 0.15. The removed `setup`, `proxy`, and `cron` interfaces are intentionally not accepted by the new CLI. Normal uninstall removes system units but retains manager configuration, Mihomo, and its data; `uninstall --purge --yes` removes the complete managed system installation.
