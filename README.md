@@ -78,8 +78,16 @@ choice protected by a secret.
 
 `init` downloads the subscription YAML, preserves unmanaged YAML fields such as
 `tun`, `dns`, proxies, groups, and rules, then applies Mihoto's local TOML
-overrides. A failed config, core, UI, or geodata update does not replace the
-last staged working file or restart the service on partial state.
+overrides. Profiles exported by GUI clients may omit DNS and TUN settings that
+the GUI injects at runtime; such profiles are not standalone Mihomo configs.
+For full-host TUN, provide an explicit working `dns` section and the required
+TUN DNS hijack settings in the subscription YAML.
+
+Mihoto validates staged configuration with the installed Mihomo core before
+replacement. After replacement it verifies that the service remains active
+without increasing its restart counter; a failed health check atomically
+restores the previous config and service. A failed config, core, UI, or geodata
+update does not restart the service on partial state.
 
 `mihoto uninstall` stops and removes Mihoto's units while retaining `/etc` data
 and binaries for a future reinstall. `mihoto uninstall --purge --yes` removes
