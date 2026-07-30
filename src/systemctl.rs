@@ -60,6 +60,11 @@ impl Systemctl {
         self
     }
 
+    pub fn reset_failed(&mut self, service: &str) -> &mut Self {
+        self.systemctl.arg("reset-failed").arg(service);
+        self
+    }
+
     pub fn execute(&mut self) -> Result<ExitStatus> {
         let status = self
             .systemctl

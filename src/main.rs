@@ -225,7 +225,7 @@ async fn cli() -> Result<()> {
             if *all {
                 report
                     .run("config", Some("refreshing remote config"), || {
-                        mihoto.update_config(&client)
+                        mihoto.update_config_and_restart(&client)
                     })
                     .await;
                 report
@@ -293,15 +293,16 @@ async fn cli() -> Result<()> {
             } else if *config || (!*core && !*geodata && !*ui) {
                 report
                     .run("config", Some("refreshing remote config"), || {
-                        mihoto.update_config(&client)
+                        mihoto.update_config_and_restart(&client)
                     })
                     .await;
                 if !report.has_failures() {
-                    report
-                        .run("service restart", Some("restarting mihomo.service"), || {
-                            mihoto.restart_service()
-                        })
-                        .await;
+                    report.record(
+                        "service restart",
+                        StageStatus::Skipped(
+                            "completed transactionally with config update".to_string(),
+                        ),
+                    );
                 } else {
                     report.record(
                         "service restart",

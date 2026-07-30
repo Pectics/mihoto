@@ -43,6 +43,7 @@ install -d -m 0750 /etc/mihomo/ui
 printf '%s\n' \
 	'#!/bin/sh' \
 	'if [ "${1:-}" = "-v" ]; then echo "Mihomo Meta test-v1"; exit 0; fi' \
+	'if [ "${1:-}" = "-t" ]; then exit 0; fi' \
 	'trap "exit 0" INT TERM' \
 	'while :; do sleep 30 & wait $!; done' \
 	> /usr/local/bin/mihomo

@@ -15,11 +15,14 @@ use std::io::Write;
 use std::os::unix::prelude::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use colored::Colorize;
 use reqwest::Client;
 use tempfile::NamedTempFile;
+
+const SERVICE_HEALTH_DELAY: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub struct Mihoto {
@@ -189,6 +192,111 @@ impl Mihoto {
     pub fn validate_installed_config(&self) -> Result<StageStatus> {
         self.validate_mihomo_config(Path::new(&self.mihomo_target_config_path))?;
         Ok(StageStatus::Installed)
+    }
+
+    fn backup_current_config(&self) -> Result<Option<NamedTempFile>> {
+        let target = Path::new(&self.mihomo_target_config_path);
+        if !target.exists() {
+            return Ok(None);
+        }
+        let backup = NamedTempFile::new_in(&self.mihomo_target_config_root)?;
+        fs::copy(target, backup.path())?;
+        fs::set_permissions(backup.path(), fs::Permissions::from_mode(0o600))?;
+        backup.as_file().sync_all()?;
+        Ok(Some(backup))
+    }
+
+    fn restore_config_backup(&self, backup: Option<NamedTempFile>) -> Result<bool> {
+        let target = Path::new(&self.mihomo_target_config_path);
+        match backup {
+            Some(backup) => {
+                backup.persist(target).map_err(|error| error.error)?;
+                Ok(true)
+            }
+            None => {
+                if target.exists() {
+                    fs::remove_file(target)?;
+                }
+                Ok(false)
+            }
+        }
+    }
+
+    async fn restart_and_verify_with_program(
+        &self,
+        systemctl_program: &Path,
+        health_delay: Duration,
+    ) -> Result<()> {
+        Systemctl::with_program(systemctl_program)
+            .restart("mihomo.service")
+            .execute()?;
+        if !health_delay.is_zero() {
+            tokio::time::sleep(health_delay).await;
+        }
+        if !Systemctl::is_active_with_program(systemctl_program, "mihomo.service") {
+            anyhow::bail!("mihomo.service did not remain active after restart");
+        }
+        Ok(())
+    }
+
+    async fn rollback_config_after_failed_restart(
+        &self,
+        backup: Option<NamedTempFile>,
+        systemctl_program: &Path,
+        health_delay: Duration,
+    ) -> Result<()> {
+        let _ = Systemctl::with_program(systemctl_program)
+            .stop("mihomo.service")
+            .execute();
+        let had_previous_config = self.restore_config_backup(backup)?;
+        if !had_previous_config {
+            return Ok(());
+        }
+        Systemctl::with_program(systemctl_program)
+            .reset_failed("mihomo.service")
+            .execute()?;
+        self.restart_and_verify_with_program(systemctl_program, health_delay)
+            .await
+    }
+
+    async fn update_config_and_restart_with_program(
+        &self,
+        client: &Client,
+        systemctl_program: &Path,
+        health_delay: Duration,
+    ) -> Result<StageStatus> {
+        let backup = self.backup_current_config()?;
+        self.update_config(client).await?;
+        if let Err(restart_error) = self
+            .restart_and_verify_with_program(systemctl_program, health_delay)
+            .await
+        {
+            return match self
+				.rollback_config_after_failed_restart(
+					backup,
+					systemctl_program,
+					health_delay,
+				)
+				.await
+			{
+				Ok(()) => Err(anyhow!(
+					"updated config failed service health verification and was rolled back: {restart_error:#}"
+				)),
+				Err(recovery_error) => Err(anyhow!(
+					"updated config failed service health verification ({restart_error:#}); rollback recovery also failed: {recovery_error:#}"
+				)),
+			};
+        }
+        Ok(StageStatus::Installed)
+    }
+
+    pub async fn update_config_and_restart(&self, client: &Client) -> Result<StageStatus> {
+        self.update_config_and_restart_with_program(
+            client,
+            Path::new("systemctl"),
+            SERVICE_HEALTH_DELAY,
+        )
+        .await
     }
 
     fn apply_existing_config_atomically(&self) -> Result<bool> {
@@ -542,6 +650,8 @@ impl Mihoto {
     }
 
     pub async fn apply(&self) -> Result<()> {
+        let backup = self.backup_current_config()?;
+
         // Apply mihomo config override
         self.apply_existing_config_atomically()?;
         println!(
@@ -549,13 +659,28 @@ impl Mihoto {
             self.prefix.green().bold()
         );
 
-        // Restart mihomo systemd service
-        Systemctl::new()
-            .restart("mihomo.service")
-            .execute()
-            .map(|_| {
-                println!("{} Restarted mihomo.service", self.prefix.green().bold());
-            })?;
+        // Restart Mihomo and restore the previous config if the service does not stay healthy.
+        if let Err(restart_error) = self
+            .restart_and_verify_with_program(Path::new("systemctl"), SERVICE_HEALTH_DELAY)
+            .await
+        {
+            return match self
+				.rollback_config_after_failed_restart(
+					backup,
+					Path::new("systemctl"),
+					SERVICE_HEALTH_DELAY,
+				)
+				.await
+			{
+				Ok(()) => Err(anyhow!(
+					"applied config failed service health verification and was rolled back: {restart_error:#}"
+				)),
+				Err(recovery_error) => Err(anyhow!(
+					"applied config failed service health verification ({restart_error:#}); rollback recovery also failed: {recovery_error:#}"
+				)),
+			};
+        }
+        println!("{} Restarted mihomo.service", self.prefix.green().bold());
         Ok(())
     }
 
@@ -952,6 +1077,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn healthy_restart_commits_updated_config() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/config.yaml"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("tun:\n  enable: true\nrules:\n  - MATCH,DIRECT\n"),
+            )
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let original = "tun:\n  enable: false\nrules:\n  - MATCH,DIRECT\n";
+        let config_path = dir.path().join("config.yaml");
+        fs::write(&config_path, original).unwrap();
+        let mihomo_binary = fake_mihomo(dir.path(), 0);
+        let systemctl = fake_systemctl(dir.path(), 0);
+        let config = Config {
+            remote_config_url: format!("{}/config.yaml", server.uri()),
+            mihomo_binary_path: mihomo_binary.display().to_string(),
+            mihomo_config_root: dir.path().display().to_string(),
+            ..Config::default()
+        };
+        let mihoto = Mihoto::from_config(config);
+
+        assert!(matches!(
+            mihoto
+                .update_config_and_restart_with_program(
+                    &Client::new(),
+                    &systemctl,
+                    std::time::Duration::ZERO,
+                )
+                .await
+                .unwrap(),
+            StageStatus::Installed
+        ));
+        assert_ne!(fs::read_to_string(config_path).unwrap(), original);
+        let calls = fs::read_to_string(dir.path().join("systemctl.log")).unwrap();
+        assert_eq!(calls.matches("restart mihomo.service").count(), 1);
+        assert!(!calls.contains("stop mihomo.service"));
+        assert!(!calls.contains("reset-failed mihomo.service"));
+    }
+
+    #[tokio::test]
     async fn updated_remote_config_is_private() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -988,9 +1157,11 @@ mod tests {
         let config_path = dir.path().join("config.yaml");
         fs::write(&config_path, original).unwrap();
         let mihomo_binary = fake_mihomo(dir.path(), 1);
-        let mut config = Config::default();
-        config.mihomo_binary_path = mihomo_binary.display().to_string();
-        config.mihomo_config_root = dir.path().display().to_string();
+        let mut config = Config {
+            mihomo_binary_path: mihomo_binary.display().to_string(),
+            mihomo_config_root: dir.path().display().to_string(),
+            ..Config::default()
+        };
         config.mihomo_config.mixed_port = Some(17890);
         let mihoto = Mihoto::from_config(config);
 
