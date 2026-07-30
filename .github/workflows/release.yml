@@ -233,10 +233,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.validate.outputs.tag }}
           PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -eu
           if [ "$PRERELEASE" = true ]; then
-            gh release create "$TAG" release-artifacts/* --title "Mihoto $TAG" --prerelease --generate-notes
+            gh release create "$TAG" release-artifacts/* --repo "$REPOSITORY" --title "Mihoto $TAG" --prerelease --generate-notes
           else
-            gh release create "$TAG" release-artifacts/* --title "Mihoto $TAG" --latest --generate-notes
+            gh release create "$TAG" release-artifacts/* --repo "$REPOSITORY" --title "Mihoto $TAG" --latest --generate-notes
           fi

@@ -37,6 +37,7 @@ for required in \
 	'needs: [validate, quality, assemble, attest, audit-acceptance]' \
 	"github.event_name == 'push'" \
 	'github.event.inputs.tag' \
+	'--repo "$REPOSITORY"' \
 	'--prerelease' \
 	'--latest'; do
 	grep -Fq -- "$required" "$workflow"
