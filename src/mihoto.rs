@@ -950,6 +950,24 @@ mod tests {
         program
     }
 
+    fn fake_restart_loop_then_recovered_systemctl(dir: &Path) -> PathBuf {
+        let program = dir.join("systemctl-restarts");
+        let log = dir.join("systemctl-restarts.log");
+        let state = dir.join("systemctl-restarts.state");
+        fs::write(
+			&program,
+			format!(
+				"#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\n  is-active) exit 0 ;;\n  show)\n    count=$(cat '{}' 2>/dev/null || printf '0')\n    count=$((count + 1))\n    printf '%s' \"$count\" > '{}'\n    case \"$count\" in\n      1) printf '0\\n' ;;\n      *) printf '4\\n' ;;\n    esac\n    exit 0\n    ;;\n  *) exit 0 ;;\nesac\n",
+				log.display(),
+				state.display(),
+				state.display()
+			),
+		)
+		.unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        program
+    }
+
     #[test]
     fn system_service_has_tun_capabilities() {
         let unit = render_service_string("/usr/local/bin/mihomo", "/etc/mihomo");
@@ -1118,6 +1136,45 @@ mod tests {
         assert_eq!(calls.matches("restart mihomo.service").count(), 1);
         assert!(!calls.contains("stop mihomo.service"));
         assert!(!calls.contains("reset-failed mihomo.service"));
+    }
+
+    #[tokio::test]
+    async fn restart_counter_growth_rolls_back_even_while_service_is_active() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/config.yaml"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("tun:\n  enable: true\nrules:\n  - MATCH,DIRECT\n"),
+            )
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let original = "tun:\n  enable: false\nrules:\n  - MATCH,DIRECT\n";
+        let config_path = dir.path().join("config.yaml");
+        fs::write(&config_path, original).unwrap();
+        let mihomo_binary = fake_mihomo(dir.path(), 0);
+        let systemctl = fake_restart_loop_then_recovered_systemctl(dir.path());
+        let config = Config {
+            remote_config_url: format!("{}/config.yaml", server.uri()),
+            mihomo_binary_path: mihomo_binary.display().to_string(),
+            mihomo_config_root: dir.path().display().to_string(),
+            ..Config::default()
+        };
+        let mihoto = Mihoto::from_config(config);
+
+        assert!(mihoto
+            .update_config_and_restart_with_program(
+                &Client::new(),
+                &systemctl,
+                std::time::Duration::ZERO,
+            )
+            .await
+            .is_err());
+        assert_eq!(fs::read_to_string(config_path).unwrap(), original);
+        let calls = fs::read_to_string(dir.path().join("systemctl-restarts.log")).unwrap();
+        assert!(calls.contains("reset-failed mihomo.service"));
     }
 
     #[tokio::test]
