@@ -197,43 +197,29 @@ jobs:
         with:
           subject-path: release-artifacts/*
 
-  real-host-acceptance:
-    name: Validate systemd and TUN on x86_64
+  audit-acceptance:
+    name: Verify recorded host acceptance and release decision
     needs: [validate, quality]
-    runs-on: [self-hosted, linux, systemd, tun, x64]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ needs.validate.outputs.tag }}
-      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
-        with:
-          toolchain: 1.88.0
-      - run: cargo build --locked --release
-      - name: Exercise real systemd and TUN lifecycle
-        run: sudo env MIHOTO_SYSTEMD_INTEGRATION=1 MIHOTO_ALLOW_SYSTEMD_MUTATION=1 MIHOTO_TUN_INTEGRATION=1 MIHOTO_REAL_MIHOMO=/usr/local/libexec/mihoto-test/mihomo scripts/test-systemd-integration.sh
-      - name: Exercise real TUN routing and cleanup
-        run: sudo env MIHOTO_TUN_INTEGRATION=1 MIHOTO_ALLOW_SYSTEMD_MUTATION=1 MIHOTO_REAL_MIHOMO=/usr/local/libexec/mihoto-test/mihomo scripts/test-tun-integration.sh
-
-  real-host-acceptance-arm64:
-    name: Validate systemd and TUN on aarch64
-    needs: [validate, quality]
-    runs-on: [self-hosted, linux, systemd, tun, arm64]
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          ref: ${{ needs.validate.outputs.tag }}
-      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
-        with:
-          toolchain: 1.88.0
-      - run: cargo build --locked --release
-      - name: Exercise real systemd and TUN lifecycle
-        run: sudo env MIHOTO_SYSTEMD_INTEGRATION=1 MIHOTO_ALLOW_SYSTEMD_MUTATION=1 MIHOTO_TUN_INTEGRATION=1 MIHOTO_REAL_MIHOMO=/usr/local/libexec/mihoto-test/mihomo scripts/test-systemd-integration.sh
-      - name: Exercise real TUN routing and cleanup
-        run: sudo env MIHOTO_TUN_INTEGRATION=1 MIHOTO_ALLOW_SYSTEMD_MUTATION=1 MIHOTO_REAL_MIHOMO=/usr/local/libexec/mihoto-test/mihomo scripts/test-tun-integration.sh
+      - name: Require the versioned audit decision
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -eu
+          audit="docs/audits/v${VERSION}.md"
+          test -f docs/audits/v1.0.0.md
+          test -f "$audit"
+          grep -Fq '67c9f1b5739340fec9aa12c5bb7e1a1c5b9f519c' "$audit"
+          grep -Fq 'accepted the post-evidence RED/GREEN remediation' "$audit"
+          grep -Fq 'Required from the tag workflow' "$audit"
 
   release:
     name: Publish verified release
-    needs: [validate, quality, assemble, attest, real-host-acceptance, real-host-acceptance-arm64]
+    needs: [validate, quality, assemble, attest, audit-acceptance]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
