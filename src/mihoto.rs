@@ -807,6 +807,24 @@ mod tests {
         program
     }
 
+    fn fake_unhealthy_then_recovered_systemctl(dir: &Path) -> PathBuf {
+        let program = dir.join("systemctl-health");
+        let log = dir.join("systemctl-health.log");
+        let state = dir.join("systemctl-health.state");
+        fs::write(
+			&program,
+			format!(
+				"#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = is-active ]; then\n  count=$(cat '{}' 2>/dev/null || printf '0')\n  count=$((count + 1))\n  printf '%s' \"$count\" > '{}'\n  [ \"$count\" -gt 1 ]\n  exit\nfi\nexit 0\n",
+				log.display(),
+				state.display(),
+				state.display()
+			),
+		)
+		.unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        program
+    }
+
     #[test]
     fn system_service_has_tun_capabilities() {
         let unit = render_service_string("/usr/local/bin/mihomo", "/etc/mihomo");
@@ -890,6 +908,47 @@ mod tests {
         assert!(calls.contains("-t"));
         assert!(calls.contains("-d"));
         assert!(calls.contains("-f"));
+    }
+
+    #[tokio::test]
+    async fn unhealthy_restart_restores_previous_config() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/config.yaml"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("tun:\n  enable: true\nrules:\n  - MATCH,DIRECT\n"),
+            )
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let original = "tun:\n  enable: false\nrules:\n  - MATCH,DIRECT\n";
+        let config_path = dir.path().join("config.yaml");
+        fs::write(&config_path, original).unwrap();
+        let mihomo_binary = fake_mihomo(dir.path(), 0);
+        let systemctl = fake_unhealthy_then_recovered_systemctl(dir.path());
+        let config = Config {
+            remote_config_url: format!("{}/config.yaml", server.uri()),
+            mihomo_binary_path: mihomo_binary.display().to_string(),
+            mihomo_config_root: dir.path().display().to_string(),
+            ..Config::default()
+        };
+        let mihoto = Mihoto::from_config(config);
+
+        assert!(mihoto
+            .update_config_and_restart_with_program(
+                &Client::new(),
+                &systemctl,
+                std::time::Duration::ZERO,
+            )
+            .await
+            .is_err());
+        assert_eq!(fs::read_to_string(config_path).unwrap(), original);
+        let calls = fs::read_to_string(dir.path().join("systemctl-health.log")).unwrap();
+        assert!(calls.contains("stop mihomo.service"));
+        assert!(calls.contains("reset-failed mihomo.service"));
+        assert_eq!(calls.matches("restart mihomo.service").count(), 2);
     }
 
     #[tokio::test]
