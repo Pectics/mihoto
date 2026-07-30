@@ -120,7 +120,7 @@ jobs:
         if: startsWith(matrix.target, 'aarch64-')
         run: |
           sudo apt-get update
-          sudo apt-get install --yes qemu-user-static libc6-arm64-cross
+          sudo apt-get install --yes qemu-user-static libc6-arm64-cross libgcc-s1-arm64-cross
       - name: Verify binary and archive
         env:
           TAG: ${{ needs.validate.outputs.tag }}
