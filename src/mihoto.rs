@@ -227,6 +227,8 @@ impl Mihoto {
         systemctl_program: &Path,
         health_delay: Duration,
     ) -> Result<()> {
+        let restarts_before =
+            Systemctl::property_u64_with_program(systemctl_program, "mihomo.service", "NRestarts")?;
         Systemctl::with_program(systemctl_program)
             .restart("mihomo.service")
             .execute()?;
@@ -235,6 +237,13 @@ impl Mihoto {
         }
         if !Systemctl::is_active_with_program(systemctl_program, "mihomo.service") {
             anyhow::bail!("mihomo.service did not remain active after restart");
+        }
+        let restarts_after =
+            Systemctl::property_u64_with_program(systemctl_program, "mihomo.service", "NRestarts")?;
+        if restarts_after > restarts_before {
+            anyhow::bail!(
+				"mihomo.service restarted during health verification ({restarts_before} -> {restarts_after})"
+			);
         }
         Ok(())
     }
@@ -908,7 +917,7 @@ mod tests {
         fs::write(
 			&program,
 			format!(
-				"#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\n  is-active|is-enabled) exit {query_exit} ;;\n  *) exit 0 ;;\nesac\n",
+				"#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\n  is-active|is-enabled) exit {query_exit} ;;\n  show) printf '0\\n'; exit 0 ;;\n  *) exit 0 ;;\nesac\n",
 				log.display()
 			),
 		)
@@ -939,7 +948,7 @@ mod tests {
         fs::write(
 			&program,
 			format!(
-				"#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = is-active ]; then\n  count=$(cat '{}' 2>/dev/null || printf '0')\n  count=$((count + 1))\n  printf '%s' \"$count\" > '{}'\n  [ \"$count\" -gt 1 ]\n  exit\nfi\nexit 0\n",
+				"#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = show ]; then printf '0\\n'; exit 0; fi\nif [ \"$1\" = is-active ]; then\n  count=$(cat '{}' 2>/dev/null || printf '0')\n  count=$((count + 1))\n  printf '%s' \"$count\" > '{}'\n  [ \"$count\" -gt 1 ]\n  exit\nfi\nexit 0\n",
 				log.display(),
 				state.display(),
 				state.display()

@@ -106,4 +106,23 @@ impl Systemctl {
             .map(|s| s.success())
             .unwrap_or(false)
     }
+
+    pub fn property_u64_with_program(program: &Path, service: &str, property: &str) -> Result<u64> {
+        let output = Command::new(program)
+            .arg("show")
+            .arg(service)
+            .arg("--property")
+            .arg(property)
+            .arg("--value")
+            .output()
+            .with_context(|| format!("failed to query systemd property {property}"))?;
+        if !output.status.success() {
+            anyhow::bail!("systemctl show exited with {}", output.status);
+        }
+        let value = String::from_utf8_lossy(&output.stdout);
+        value
+            .trim()
+            .parse()
+            .with_context(|| format!("invalid systemd {property} value `{}`", value.trim()))
+    }
 }
