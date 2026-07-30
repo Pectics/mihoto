@@ -156,6 +156,41 @@ impl Mihoto {
         Ok(())
     }
 
+    fn validate_mihomo_config(&self, config_path: &Path) -> Result<()> {
+        let output = Command::new(&self.mihomo_target_binary_path)
+            .arg("-t")
+            .arg("-d")
+            .arg(&self.mihomo_target_config_root)
+            .arg("-f")
+            .arg(config_path)
+            .output()
+            .map_err(|error| {
+                anyhow!(
+                    "failed to validate staged Mihomo config with `{}`: {error}",
+                    self.mihomo_target_binary_path
+                )
+            })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let detail = if stderr.trim().is_empty() {
+                stdout.trim()
+            } else {
+                stderr.trim()
+            };
+            if detail.is_empty() {
+                anyhow::bail!("Mihomo rejected staged config with {}", output.status);
+            }
+            anyhow::bail!("Mihomo rejected staged config: {detail}");
+        }
+        Ok(())
+    }
+
+    pub fn validate_installed_config(&self) -> Result<StageStatus> {
+        self.validate_mihomo_config(Path::new(&self.mihomo_target_config_path))?;
+        Ok(StageStatus::Installed)
+    }
+
     fn apply_existing_config_atomically(&self) -> Result<bool> {
         self.ensure_config_root_secure()?;
         let target = Path::new(&self.mihomo_target_config_path);
@@ -166,6 +201,7 @@ impl Mihoto {
             staged.path().to_string_lossy().as_ref(),
             &self.config.mihomo_config,
         )?;
+        self.validate_mihomo_config(staged.path())?;
         if changed {
             staged.as_file().sync_all()?;
             staged.persist(target).map_err(|error| error.error)?;
@@ -175,7 +211,11 @@ impl Mihoto {
         Ok(changed)
     }
 
-    async fn download_and_install_config(&self, client: &Client) -> Result<()> {
+    async fn download_and_install_config(
+        &self,
+        client: &Client,
+        require_validation: bool,
+    ) -> Result<()> {
         self.ensure_config_root_secure()?;
         let target = Path::new(&self.mihomo_target_config_path);
         let staged = NamedTempFile::new_in(&self.mihomo_target_config_root)?;
@@ -190,6 +230,9 @@ impl Mihoto {
         try_decode_base64_file_inplace(staged_path.as_ref())?;
         apply_mihomo_override(staged_path.as_ref(), &self.config.mihomo_config)?;
         fs::set_permissions(staged.path(), fs::Permissions::from_mode(0o600))?;
+        if require_validation || Path::new(&self.mihomo_target_binary_path).exists() {
+            self.validate_mihomo_config(staged.path())?;
+        }
         staged.as_file().sync_all()?;
         staged.persist(target).map_err(|error| error.error)?;
         Ok(())
@@ -209,7 +252,7 @@ impl Mihoto {
             };
         }
 
-        self.download_and_install_config(client).await?;
+        self.download_and_install_config(client, false).await?;
         Ok(StageStatus::Installed)
     }
 
@@ -428,7 +471,7 @@ impl Mihoto {
     }
 
     pub async fn update_config(&self, client: &Client) -> Result<StageStatus> {
-        self.download_and_install_config(client).await?;
+        self.download_and_install_config(client, true).await?;
         println!(
             "{} Updated and applied config overrides",
             DETAIL_PREFIX.cyan()

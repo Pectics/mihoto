@@ -243,18 +243,35 @@ pub async fn run(config_path: &str, client: &Client, opts: InitOptions) -> Resul
         };
         report.record("install binary", install_status);
 
-        if report.stage_failed("install binary") {
+        if !report.stage_failed("install binary") {
+            report.begin(
+                "config validation",
+                Some("validating config with the installed Mihomo core"),
+            );
+            let validation_status = match mihoto.validate_installed_config() {
+                Ok(status) => status,
+                Err(error) => StageStatus::Failed(error),
+            };
+            report.record("config validation", validation_status);
+        }
+
+        if report.stage_failed("install binary") || report.stage_failed("config validation") {
+            let reason = if report.stage_failed("install binary") {
+                "binary installation failed"
+            } else {
+                "config validation failed"
+            };
             report.record(
                 "systemd service",
-                StageStatus::Skipped("skipped: binary installation failed".to_string()),
+                StageStatus::Skipped(format!("skipped: {reason}")),
             );
             report.record(
                 "service start",
-                StageStatus::Skipped("skipped: binary installation failed".to_string()),
+                StageStatus::Skipped(format!("skipped: {reason}")),
             );
             report.record(
                 "update timer",
-                StageStatus::Skipped("skipped: binary installation failed".to_string()),
+                StageStatus::Skipped(format!("skipped: {reason}")),
             );
         } else {
             report
