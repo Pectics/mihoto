@@ -1,11 +1,10 @@
 mod cmd;
 mod config;
-mod cron;
 mod init;
-mod mihoro;
-mod proxy;
+mod mihoto;
 mod resolve_mihomo_bin;
 mod systemctl;
+mod timer;
 mod ui;
 #[cfg(feature = "self_update")]
 mod upgrade;
@@ -18,11 +17,12 @@ use clap_complete::{
     shells::{Bash, Fish, Zsh},
 };
 use colored::Colorize;
+use dialoguer::Confirm;
 use reqwest::Client;
-use std::{future::Future, io, process::Command, time::Duration};
+use std::{future::Future, io, path::Path, process::Command, time::Duration};
 
 use cmd::{Args, ClapShell, Commands};
-use mihoro::{Mihoro, StageStatus};
+use mihoto::{Mihoto, StageStatus};
 use systemctl::Systemctl;
 
 struct StageReport {
@@ -61,7 +61,7 @@ impl StageReport {
     }
 
     fn print(&self, label: &str) {
-        println!("{} {}", "mihoro:".cyan().bold(), label.bold());
+        println!("{} {}", "mihoto:".cyan().bold(), label.bold());
         for (name, status) in &self.entries {
             match status {
                 StageStatus::Installed => {
@@ -90,6 +90,35 @@ impl StageReport {
     }
 }
 
+fn command_requires_root(command: &Commands) -> bool {
+    !matches!(
+        command,
+        Commands::Status
+            | Commands::Log
+            | Commands::Completions { .. }
+            | Commands::Timer {
+                timer: cmd::TimerCommands::Status
+            }
+            | Commands::Upgrade { check: true, .. }
+    )
+}
+
+fn command_requires_config(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::Update { .. }
+            | Commands::Apply
+            | Commands::Timer {
+                timer: cmd::TimerCommands::Enable
+            }
+    )
+}
+
+fn running_as_root() -> bool {
+    // SAFETY: `geteuid` has no preconditions and does not dereference pointers.
+    unsafe { libc::geteuid() == 0 }
+}
+
 #[tokio::main]
 async fn main() {
     if let Err(err) = cli().await {
@@ -100,48 +129,87 @@ async fn main() {
 
 async fn cli() -> Result<()> {
     let args = Args::parse();
+    if args.command.as_ref().is_some_and(|command| {
+        matches!(command, Commands::Init { .. } | Commands::Uninstall { .. })
+            || command_requires_config(command)
+    }) {
+        config::validate_manager_config_path(Path::new(&args.mihoto_config))?;
+    }
+
+    // Read-only commands deliberately do not load or create the manager configuration.
+    match &args.command {
+        Some(Commands::Status) => {
+            Systemctl::new().status("mihomo.service").execute()?;
+            return Ok(());
+        }
+        Some(Commands::Log) => {
+            let status = Command::new("journalctl")
+                .arg("-xeu")
+                .arg("mihomo.service")
+                .arg("-n")
+                .arg("10")
+                .arg("-f")
+                .status()?;
+            if !status.success() {
+                anyhow::bail!("journalctl exited with {status}");
+            }
+            return Ok(());
+        }
+        Some(Commands::Timer {
+            timer: cmd::TimerCommands::Status,
+        }) => {
+            timer::status()?;
+            return Ok(());
+        }
+        Some(Commands::Completions { shell }) => {
+            match shell {
+                Some(ClapShell::Bash) => {
+                    generate(Bash, &mut Args::command(), "mihoto", &mut io::stdout())
+                }
+                Some(ClapShell::Zsh) => {
+                    generate(Zsh, &mut Args::command(), "mihoto", &mut io::stdout())
+                }
+                Some(ClapShell::Fish) => {
+                    generate(Fish, &mut Args::command(), "mihoto", &mut io::stdout())
+                }
+                None => {}
+            }
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    if args.command.as_ref().is_some_and(command_requires_root) && !running_as_root() {
+        anyhow::bail!("this command requires root; run it with sudo");
+    }
+
     let client = Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .read_timeout(Duration::from_secs(30))
         .build()?;
 
-    // Handle Init and Setup before constructing Mihoro, which requires a valid config.
-    match &args.command {
-        Some(Commands::Init { force, arch, yes }) => {
-            return init::run(
-                &args.mihoro_config,
-                &client,
-                init::InitOptions {
-                    force: *force,
-                    arch: arch.clone(),
-                    yes: *yes,
-                },
-            )
-            .await;
-        }
-        Some(Commands::Setup { overwrite, arch }) => {
-            eprintln!(
-                "{} `setup` is deprecated - use `mihoro init` instead",
-                "warning:".yellow()
-            );
-            return init::run(
-                &args.mihoro_config,
-                &client,
-                init::InitOptions {
-                    force: *overwrite,
-                    arch: arch.clone(),
-                    yes: true,
-                },
-            )
-            .await;
-        }
-        _ => {}
+    // Handle Init and Setup before constructing Mihoto, which requires a valid config.
+    if let Some(Commands::Init { force, arch, yes }) = &args.command {
+        return init::run(
+            &args.mihoto_config,
+            &client,
+            init::InitOptions {
+                force: *force,
+                arch: arch.clone(),
+                yes: *yes,
+            },
+        )
+        .await;
     }
 
-    let mihoro = Mihoro::new(&args.mihoro_config)?;
+    let mihoto = if args.command.as_ref().is_some_and(command_requires_config) {
+        Some(Mihoto::new(&args.mihoto_config)?)
+    } else {
+        None
+    };
 
     match &args.command {
-        Some(Commands::Init { .. }) | Some(Commands::Setup { .. }) => unreachable!(),
+        Some(Commands::Init { .. }) => unreachable!(),
         Some(Commands::Update {
             config,
             core,
@@ -150,34 +218,35 @@ async fn cli() -> Result<()> {
             arch,
             ui,
         }) => {
-            println!("{} update initiated", "mihoro:".cyan().bold());
+            let mihoto = mihoto.as_ref().expect("update requires config");
+            println!("{} update initiated", "mihoto:".cyan().bold());
             let mut report = StageReport::new();
 
             if *all {
                 report
                     .run("config", Some("refreshing remote config"), || {
-                        mihoro.update_config(&client)
+                        mihoto.update_config_and_restart(&client)
                     })
                     .await;
                 report
                     .run("geodata", Some("refreshing geodata"), || {
-                        mihoro.update_geodata(&client)
+                        mihoto.update_geodata(&client)
                     })
                     .await;
                 report
                     .run("ui", Some("refreshing dashboard assets"), || {
-                        mihoro.update_ui(&client)
+                        mihoto.update_ui(&client)
                     })
                     .await;
                 report
                     .run("core", Some("refreshing mihomo core"), || {
-                        mihoro.update_core(&client, arch.as_deref())
+                        mihoto.update_core(&client, arch.as_deref())
                     })
                     .await;
                 if !report.has_failures() {
                     report
                         .run("service restart", Some("restarting mihomo.service"), || {
-                            mihoro.restart_service()
+                            mihoto.restart_service()
                         })
                         .await;
                 } else {
@@ -189,13 +258,13 @@ async fn cli() -> Result<()> {
             } else if *core {
                 report
                     .run("core", Some("refreshing mihomo core"), || {
-                        mihoro.update_core(&client, arch.as_deref())
+                        mihoto.update_core(&client, arch.as_deref())
                     })
                     .await;
                 if !report.has_failures() && report.has_installed("core") {
                     report
                         .run("service restart", Some("restarting mihomo.service"), || {
-                            mihoro.restart_service()
+                            mihoto.restart_service()
                         })
                         .await;
                 } else if report.has_failures() {
@@ -212,27 +281,28 @@ async fn cli() -> Result<()> {
             } else if *ui {
                 report
                     .run("ui", Some("refreshing dashboard assets"), || {
-                        mihoro.update_ui(&client)
+                        mihoto.update_ui(&client)
                     })
                     .await;
             } else if *geodata {
                 report
                     .run("geodata", Some("refreshing geodata"), || {
-                        mihoro.update_geodata(&client)
+                        mihoto.update_geodata(&client)
                     })
                     .await;
             } else if *config || (!*core && !*geodata && !*ui) {
                 report
                     .run("config", Some("refreshing remote config"), || {
-                        mihoro.update_config(&client)
+                        mihoto.update_config_and_restart(&client)
                     })
                     .await;
                 if !report.has_failures() {
-                    report
-                        .run("service restart", Some("restarting mihomo.service"), || {
-                            mihoro.restart_service()
-                        })
-                        .await;
+                    report.record(
+                        "service restart",
+                        StageStatus::Skipped(
+                            "completed transactionally with config update".to_string(),
+                        ),
+                    );
                 } else {
                     report.record(
                         "service restart",
@@ -246,15 +316,33 @@ async fn cli() -> Result<()> {
                 anyhow::bail!("one or more update stages failed - see summary above");
             }
         }
-        Some(Commands::Apply) => mihoro.apply().await?,
-        Some(Commands::Uninstall) => mihoro.uninstall()?,
-        Some(Commands::Proxy { proxy }) => mihoro.proxy_commands(proxy)?,
+        Some(Commands::Apply) => {
+            let mihoto = mihoto.as_ref().expect("apply requires config");
+            mihoto.apply().await?;
+            timer::reconcile(&mihoto.config, &args.mihoto_config)?;
+        }
+        Some(Commands::Uninstall { purge, yes }) => {
+            if *purge
+                && !*yes
+                && !Confirm::new()
+                    .with_prompt(
+                        "Permanently remove mihoto, Mihomo, and all managed system configuration?",
+                    )
+                    .default(false)
+                    .interact()?
+            {
+                anyhow::bail!("purge cancelled");
+            }
+            let config =
+                config::load_config(&args.mihoto_config)?.unwrap_or_else(config::Config::default);
+            Mihoto::from_config(config).uninstall(*purge, Path::new(&args.mihoto_config))?;
+        }
 
         Some(Commands::Start) => Systemctl::new()
             .start("mihomo.service")
             .execute()
             .map(|_| {
-                println!("{} Started mihomo.service", mihoro.prefix.green());
+                println!("{} Started mihomo.service", "mihoto:".green());
             })?,
 
         Some(Commands::Status) => {
@@ -262,7 +350,7 @@ async fn cli() -> Result<()> {
         }
 
         Some(Commands::Stop) => Systemctl::new().stop("mihomo.service").execute().map(|_| {
-            println!("{} Stopped mihomo.service", mihoro.prefix.green());
+            println!("{} Stopped mihomo.service", "mihoto:".green());
         })?,
 
         Some(Commands::Restart) => {
@@ -270,13 +358,12 @@ async fn cli() -> Result<()> {
                 .restart("mihomo.service")
                 .execute()
                 .map(|_| {
-                    println!("{} Restarted mihomo.service", mihoro.prefix.green());
+                    println!("{} Restarted mihomo.service", "mihoto:".green());
                 })?
         }
 
         Some(Commands::Log) => {
             Command::new("journalctl")
-                .arg("--user")
                 .arg("-xeu")
                 .arg("mihomo.service")
                 .arg("-n")
@@ -289,18 +376,28 @@ async fn cli() -> Result<()> {
 
         Some(Commands::Completions { shell }) => match shell {
             Some(ClapShell::Bash) => {
-                generate(Bash, &mut Args::command(), "mihoro", &mut io::stdout())
+                generate(Bash, &mut Args::command(), "mihoto", &mut io::stdout())
             }
             Some(ClapShell::Zsh) => {
-                generate(Zsh, &mut Args::command(), "mihoro", &mut io::stdout())
+                generate(Zsh, &mut Args::command(), "mihoto", &mut io::stdout())
             }
             Some(ClapShell::Fish) => {
-                generate(Fish, &mut Args::command(), "mihoro", &mut io::stdout())
+                generate(Fish, &mut Args::command(), "mihoto", &mut io::stdout())
             }
             _ => (),
         },
 
-        Some(Commands::Cron { cron }) => mihoro.cron_commands(cron)?,
+        Some(Commands::Timer { timer }) => match timer {
+            cmd::TimerCommands::Enable => timer::enable(
+                &mihoto
+                    .as_ref()
+                    .expect("timer enable requires config")
+                    .config,
+                &args.mihoto_config,
+            )?,
+            cmd::TimerCommands::Disable => timer::disable()?,
+            cmd::TimerCommands::Status => timer::status()?,
+        },
 
         #[cfg(feature = "self_update")]
         Some(Commands::Upgrade { yes, check, target }) => {
@@ -309,20 +406,17 @@ async fn cli() -> Result<()> {
                     Some(version) => {
                         println!(
                             "{} New version available: {}",
-                            mihoro.prefix.yellow(),
+                            "mihoto:".yellow(),
                             version.bold().green()
                         );
                         println!(
                             "{} Run {} to update",
                             "->".dimmed(),
-                            "mihoro upgrade".bold().underline()
+                            "mihoto upgrade".bold().underline()
                         );
                     }
                     None => {
-                        println!(
-                            "{} You're running the latest version",
-                            mihoro.prefix.green()
-                        );
+                        println!("{} You're running the latest version", "mihoto:".green());
                     }
                 }
             } else {
@@ -333,11 +427,94 @@ async fn cli() -> Result<()> {
         #[cfg(not(feature = "self_update"))]
         Some(Commands::Upgrade { .. }) => {
             anyhow::bail!(
-                "mihoro was built without self_update support, please use your package manager to upgrade"
+                "mihoto was built without self_update support, please use your package manager to upgrade"
             );
         }
 
         None => (),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod command_policy_tests {
+    use super::*;
+    #[test]
+    fn root_policy_is_explicit() {
+        assert!(command_requires_root(&Commands::Init {
+            force: false,
+            yes: true,
+            arch: None
+        }));
+        assert!(command_requires_root(&Commands::Update {
+            config: false,
+            ui: false,
+            core: false,
+            geodata: false,
+            all: false,
+            arch: None
+        }));
+        assert!(command_requires_root(&Commands::Apply));
+        assert!(command_requires_root(&Commands::Start));
+        assert!(command_requires_root(&Commands::Stop));
+        assert!(command_requires_root(&Commands::Restart));
+        assert!(command_requires_root(&Commands::Timer {
+            timer: cmd::TimerCommands::Enable
+        }));
+        assert!(command_requires_root(&Commands::Uninstall {
+            purge: false,
+            yes: false
+        }));
+        assert!(command_requires_root(&Commands::Upgrade {
+            yes: true,
+            check: false,
+            target: None
+        }));
+        assert!(!command_requires_root(&Commands::Status));
+        assert!(!command_requires_root(&Commands::Log));
+        assert!(!command_requires_root(&Commands::Completions {
+            shell: Some(ClapShell::Bash)
+        }));
+        assert!(!command_requires_root(&Commands::Upgrade {
+            yes: false,
+            check: true,
+            target: None
+        }));
+    }
+
+    #[test]
+    fn config_loading_policy_is_explicit() {
+        assert!(!command_requires_config(&Commands::Status));
+        assert!(!command_requires_config(&Commands::Log));
+        assert!(!command_requires_config(&Commands::Start));
+        assert!(!command_requires_config(&Commands::Stop));
+        assert!(!command_requires_config(&Commands::Restart));
+        assert!(!command_requires_config(&Commands::Timer {
+            timer: cmd::TimerCommands::Disable
+        }));
+        assert!(!command_requires_config(&Commands::Timer {
+            timer: cmd::TimerCommands::Status
+        }));
+        assert!(!command_requires_config(&Commands::Uninstall {
+            purge: false,
+            yes: false
+        }));
+        assert!(!command_requires_config(&Commands::Upgrade {
+            yes: false,
+            check: true,
+            target: None
+        }));
+        assert!(command_requires_config(&Commands::Update {
+            config: false,
+            ui: false,
+            core: false,
+            geodata: false,
+            all: false,
+            arch: None
+        }));
+        assert!(command_requires_config(&Commands::Apply));
+        assert!(command_requires_config(&Commands::Timer {
+            timer: cmd::TimerCommands::Enable
+        }));
+    }
 }

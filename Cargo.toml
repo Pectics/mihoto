@@ -1,15 +1,20 @@
 [package]
-name = "mihoro"
+name = "mihoto"
 description = "Mihomo CLI client on Linux."
-version = "0.14.0"
+version = "1.0.0"
 edition = "2021"
 readme = "README.md"
 license = "MIT"
 authors = ["spencerwooo <spencer.woo@outlook.com>"]
-homepage = "https://github.com/spencerwooo/mihoro"
-repository = "https://github.com/spencerwooo/mihoro"
+homepage = "https://github.com/Pectics/mihoto"
+repository = "https://github.com/Pectics/mihoto"
 keywords = ["cli", "clash", "network", "linux", "mihomo"]
 categories = ["command-line-utilities"]
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+wiremock = "0.6"
 
 [features]
 default = ["self_update"]
@@ -22,10 +27,8 @@ colored = "3.0"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 flate2 = "1.1"
-shellexpand = "3.1"
 openssl = { version = "0.10", features = ["vendored"] }
 serde_yaml = "0.9"
-local-ip-address = "0.6"
 reqwest = { version = "0.12", features = ["stream"] }
 futures-util = "0.3"
 indicatif = "0.17"
@@ -36,9 +39,12 @@ anyhow = "1.0"
 base64 = "0.22"
 tempfile = "3.18"
 tar = "0.4"
+libc = "0.2"
 dialoguer = { version = "0.11", default-features = false }
 self_update = { version = "0.42", default-features = false, features = [
     "archive-tar",
     "compression-flate2",
     "rustls",
 ], optional = true }
+semver = "1.0"
+sha2 = "0.10"

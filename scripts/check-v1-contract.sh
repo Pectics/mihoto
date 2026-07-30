@@ -1,0 +1,42 @@
+#!/bin/sh
+set -eu
+
+cd "$(dirname "$0")/.."
+
+contract=docs/v1-contract.md
+release_notes=docs/releases/v1.0.0.md
+audit_record=docs/audits/v1.0.0.md
+
+test -f "$contract"
+test -f "$release_notes"
+test -f "$audit_record"
+grep -Fq 'version = "1.0.0"' Cargo.toml
+grep -Fq 'version = "1.0.0"' Cargo.lock
+
+for required in \
+	'/etc/mihoto.toml' \
+	'/usr/local/bin/mihoto' \
+	'/usr/local/bin/mihomo' \
+	'/etc/mihomo' \
+	'/etc/systemd/system/mihomo.service' \
+	'x86_64-unknown-linux-gnu' \
+	'x86_64-unknown-linux-musl' \
+	'aarch64-unknown-linux-gnu' \
+	'aarch64-unknown-linux-musl' \
+	'Ubuntu 22.04' \
+	'Ubuntu 24.04' \
+	'not supported' \
+	'not migrated automatically' \
+	'uninstall --purge' \
+	'SHA256SUMS' \
+	'attestation' \
+	'--version <semver>'; do
+	grep -Fqi -- "$required" "$contract" README.md "$release_notes"
+done
+
+grep -Fq 'command_requires_root' src/main.rs
+grep -Fq 'Commands::Upgrade { check: true' src/main.rs
+grep -Fq 'SHA256SUMS' src/upgrade.rs
+grep -Fq 'atomic_replace' src/upgrade.rs
+scripts/check-system-scope.sh
+scripts/check-release-workflow.sh

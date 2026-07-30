@@ -1,255 +1,136 @@
-<div align="center">
-  <div><img src="https://github.com/user-attachments/assets/b292facf-b4d0-4087-b33c-e9ffba061e73" alt="mihoro banner" width="512" /></div>
+# Mihoto
 
-  <a href="https://github.com/spencerwooo/mihoro/actions/workflows/ci.yml">
-    <img src="https://github.com/spencerwooo/mihoro/actions/workflows/ci.yml/badge.svg" alt="CI">
-  </a>
-  <a href="https://github.com/spencerwooo/mihoro/actions/workflows/release.yml">
-    <img src="https://github.com/spencerwooo/mihoro/actions/workflows/release.yml/badge.svg" alt="Release">
-  </a>
-  <a href="https://github.com/spencerwooo/mihoro/releases/latest">
-    <img src="https://img.shields.io/github/v/release/spencerwooo/mihoro" alt="GitHub release (latest by date)">
-  </a>
-</div>
+Mihoto is a system-level CLI for installing and operating Mihomo on Linux with
+systemd. The current stable product contract is `1.0.0`.
 
----
+The supported public contract is in [docs/v1-contract.md](docs/v1-contract.md).
+It is part of the test suite rather than a best-effort guide.
 
-**mihoro** - The 🦀 Rust™-based [Mihomo](https://github.com/MetaCubeX/mihomo) CLI client on Linux.
+## Supported systems
 
-- Setup, update, apply overrides, and manage with systemd. **No more, no less.**
-- No root privilege required. Maintains per-user instance.
-- First-class support for config subscription.
+Mihoto supports systemd Linux only. The release artifacts are:
 
-<img width="1136" height="911" alt="screenshot" src="https://github.com/user-attachments/assets/abfeb381-3ea2-45c8-ac0a-d55f7ba35fbb" />
+- `x86_64-unknown-linux-gnu`
+- `x86_64-unknown-linux-musl`
+- `aarch64-unknown-linux-gnu`
+- `aarch64-unknown-linux-musl`
+
+Release acceptance covers Ubuntu 22.04 and Ubuntu 24.04 on x86_64, plus a
+separate native or virtualized aarch64 systemd/TUN host. Containers without the
+required privileges, non-systemd Linux, Android, BSD, macOS, and Windows are
+not supported.
 
 ## Install
 
-```shell
-curl -fsSL https://raw.githubusercontent.com/spencerwooo/mihoro/main/install.sh | sh
+The installer selects the latest stable release by default, obtains release
+metadata and `SHA256SUMS` from GitHub, checks the archive, runs the staged
+binary's version smoke test, and atomically replaces `/usr/local/bin/mihoto`.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Pectics/mihoto/main/install.sh | sudo sh
 ```
 
-Optionally, download over a mirror:
+Install a particular stable release or RC with `--version <semver>`:
 
-```shell
-curl -fsSL https://raw.githubusercontent.com/spencerwooo/mihoro/main/install.sh | sh -s -- --mirror https://gh-proxy.org
+```sh
+curl -fsSL https://raw.githubusercontent.com/Pectics/mihoto/main/install.sh \
+  | sudo sh -s -- --version v1.0.0
 ```
 
-> [!IMPORTANT]
-> `mihoro` is installed to `~/.local/bin` by default. Ensure this is on your `$PATH`.
+`--mirror` may proxy the archive download, but it never replaces GitHub release
+metadata or the trusted `SHA256SUMS` source. An interrupted or failed install
+leaves the previous binary untouched.
 
-## Initialize
+## System ownership and root model
 
-`mihoro`, like `mihomo`, is a config-based CLI client.
+Mihoto owns only these system locations:
 
-After installing `mihoro`, run:
+- Manager config: `/etc/mihoto.toml`
+- Manager binary: `/usr/local/bin/mihoto`
+- Mihomo binary: `/usr/local/bin/mihomo`
+- Mihomo state/config: `/etc/mihomo`
+- Service: `/etc/systemd/system/mihomo.service`
+- Update units: `/etc/systemd/system/mihoto-update.service` and
+  `/etc/systemd/system/mihoto-update.timer`
 
-```bash
-mihoro init
+Use `sudo` for every state-changing command. `status`, `log`, `completions`,
+`timer status`, and `upgrade --check` are read-only: they do not create or load
+the manager config. No user-level service, user cron, or user-directory
+installation is supported.
+
+```sh
+sudo mihoto init
+sudo mihoto update --all
+sudo mihoto apply
+sudo mihoto timer enable
+mihoto status
+mihoto upgrade --check
+sudo mihoto upgrade
 ```
 
-If `~/.config/mihoro.toml` does not exist yet, `mihoro init` will create it, prompt for your remote `mihomo` or `clash` subscription URL, save it, then finish the full onboarding flow in the same run.
+`mihomo.service` runs as root with `CAP_NET_ADMIN` and `CAP_NET_RAW`, which
+makes TUN a supported core use case. The controller defaults to
+`127.0.0.1:9090`; exposing it beyond loopback must be an explicit configuration
+choice protected by a secret.
 
-Upon onboarding, `mihoro` will:
+## Configuration, recovery, and removal
 
-- download the `mihomo` core binary
-- download your remote config and apply local overrides
-- download geodata and the default web dashboard
-- install and enable `mihomo.service`
-- start the service and print the local dashboard URL
+`init` downloads the subscription YAML, preserves unmanaged YAML fields such as
+`tun`, `dns`, proxies, groups, and rules, then applies Mihoto's local TOML
+overrides. Profiles exported by GUI clients may omit DNS and TUN settings that
+the GUI injects at runtime; such profiles are not standalone Mihomo configs.
+For full-host TUN, provide an explicit working `dns` section and the required
+TUN DNS hijack settings in the subscription YAML.
 
-You can also proxy GitHub-hosted runtime downloads by setting `MIHORO_GITHUB_MIRROR` before commands such as `mihoro init` or `mihoro update`:
+Mihoto validates staged configuration with the installed Mihomo core before
+replacement. After replacement it verifies that the service remains active
+without increasing its restart counter; a failed health check atomically
+restores the previous config and service. A failed config, core, UI, or geodata
+update does not restart the service on partial state.
 
-```shell
-MIHORO_GITHUB_MIRROR=https://gh-proxy.org mihoro init
+`mihoto uninstall` stops and removes Mihoto's units while retaining `/etc` data
+and binaries for a future reinstall. `mihoto uninstall --purge --yes` removes
+only the Mihoto-managed data listed above; it must not modify unrelated units,
+networking, firewall settings, or user files.
+
+## Updates and release verification
+
+`mihoto upgrade` selects only a newer stable semantic version. It ignores
+pre-releases by default, checks `SHA256SUMS`, validates the archive, smoke-tests
+the staged executable, then atomically replaces the running binary. `upgrade
+--check` only queries GitHub and never writes local state.
+
+Each release provides four archives, one `SHA256SUMS` file, and a GitHub build
+attestation/provenance record. Verify a downloaded archive before installing:
+
+```sh
+sha256sum --check SHA256SUMS
+gh attestation verify mihoto-v1.0.0-x86_64-unknown-linux-gnu.tar.gz \
+  --repo Pectics/mihoto
 ```
 
-Note that this only applies to GitHub-hosted resource downloads and does not affect `mihoro upgrade` yet.
+## Migration from Mihoro
 
-The generated config uses sensible defaults, including `metacubexd` as the managed dashboard:
+Earlier per-user Mihoro installations are not migrated automatically. Back up
+any data you need, disable the old user service manually, and remove old user
+files before using Mihoto. The old `setup`, `proxy`, and `cron` commands do not
+exist in the v1 CLI.
 
-```toml
-remote_config_url = "https://example.com/subscription"
-ui = "metacubexd"
-mihomo_channel = "stable"
-mihomo_binary_path = "~/.local/bin/mihomo"
-mihomo_config_root = "~/.config/mihomo"
-user_systemd_root = "~/.config/systemd/user"
-mihoro_user_agent = "mihoro"
-auto_update_interval = 12
+## Development and acceptance
 
-[mihomo_config]
-port = 7891
-socks_port = 7892
-mixed_port = 7890
-allow_lan = false
-bind_address = "*"
-mode = "rule"
-log_level = "info"
-ipv6 = true
-external_controller = "0.0.0.0:9090"
-external_ui = "ui"
-geodata_mode = false
-geo_auto_update = true
-geo_update_interval = 24
-
-[mihomo_config.geox_url]
-geoip = "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat"
-geosite = "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat"
-mmdb = "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb"
+```sh
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+cargo check --all-targets
+cargo test --all-targets
+cargo test --all-targets --no-default-features
+scripts/check-system-scope.sh
+scripts/check-release-workflow.sh
+scripts/check-v1-contract.sh
+scripts/test-installer-contract.sh
 ```
 
-By default, `ui = "metacubexd"` enables dashboard management, so `mihoro init` also downloads the web UI assets and serves them from `http://127.0.0.1:9090/ui/`.
-
-`init` is idempotent — re-running it skips any artifacts that are already in place. Use `--force` to re-download everything:
-
-```bash
-mihoro init --force
-```
-
-For non-interactive environments, pre-populate `remote_config_url` in `mihoro.toml` and use:
-
-```bash
-mihoro init --yes
-```
-
-Use `--arch` if auto-detection picks the wrong mihomo build for your machine:
-
-```bash
-mihoro init --arch amd64-v3
-```
-
-## Usage
-
-To configure proxy for the current terminal session:
-
-```bash
-eval $(mihoro proxy export)
-```
-
-To revert proxy settings:
-
-```bash
-eval $(mihoro proxy unset)
-```
-
-To check running status of `mihomo` core:
-
-```bash
-mihoro status
-```
-
-To update subscribed remote config:
-
-```bash
-mihoro update
-# or explicitly: mihoro update --config
-```
-
-To apply settings changes after modifying `mihoro.toml`:
-
-```bash
-mihoro apply
-```
-
-To update `mihomo` binary (core) and/or geodata:
-
-```bash
-mihoro update --core     # updates core
-mihoro update --geodata  # updates geodata
-mihoro update --ui       # updates external UI assets
-mihoro update --all      # updates config -> geodata -> core -> ui -> restarts mihomo
-```
-
-To enable auto-update via cron job:
-
-```bash
-mihoro cron enable
-```
-
-To disable auto-update:
-
-```bash
-mihoro cron disable
-```
-
-To check auto-update status:
-
-```bash
-mihoro cron status
-```
-
-The `auto_update_interval` in `mihoro.toml` controls the update frequency in hours (default: 12, range: 1-24). Set to `0` to disable.
-
-To upgrade `mihoro` itself to the latest version:
-
-```bash
-mihoro upgrade
-```
-
-Or check for updates without installing:
-
-```bash
-mihoro upgrade --check
-```
-
-To manually specify a target architecture (useful when auto-detection fails, e.g., on Ubuntu 20.04):
-
-```bash
-mihoro upgrade --target x86_64-unknown-linux-musl
-mihoro upgrade --target aarch64-unknown-linux-musl
-```
-
-Shell auto-completions are available under `mihoro completions` for bash, fish, zsh:
-
-```bash
-# For bash:
-mihoro completions bash > $XDG_CONFIG_HOME/bash_completion/mihoro  # or /etc/bash_completion.d/mihoro
-
-# For fish:
-mihoro completions fish > $HOME/.config/fish/completions/mihoro.fish
-
-# For zsh:
-mihoro completions zsh > $XDG_CONFIG_HOME/zsh/completions/_mihoro  # or to one of your $fpath directories
-```
-
-Full list of commands:
-
-```console
-$ mihoro --help
-Mihomo CLI client on Linux.
-
-Usage: mihoro [OPTIONS] [COMMAND]
-
-Commands:
-  init         Initialize mihoro: download binary, config, geodata, and set up the systemd service
-  update       Update mihomo components (config by default)
-  apply        Apply mihomo config overrides and restart mihomo.service
-  start        Start mihomo.service with systemctl
-  status       Check mihomo.service status with systemctl
-  stop         Stop mihomo.service with systemctl
-  restart      Restart mihomo.service with systemctl
-  log          Check mihomo.service logs with journalctl [aliases: logs]
-  proxy        Output proxy export commands
-  uninstall    Uninstall and remove mihoro and config
-  completions  Generate shell completions for mihoro
-  cron         Manage auto-update cron job
-  upgrade      Upgrade mihoro to the latest version
-  help         Print this message or the help of the given subcommand(s)
-
-Options:
-  -m, --mihoro-config <MIHORO_CONFIG>  Path to mihoro config file [default: ~/.config/mihoro.toml]
-  -h, --help                           Print help
-  -V, --version                        Print version
-```
-
-## Dashboard
-
-On controlling `mihomo` itself, we recommend using a web-based dashboard. Some options include [metacubexd](https://github.com/MetaCubeX/metacubexd), [zashboard](https://github.com/Zephyruso/zashboard), or [yacd](https://github.com/MetaCubeX/Yacd-meta).
-
-Web-based dashboards require enabling `external_controller` under `[mihomo_config]`. Applying this config will expose `mihomo`'s control API under this address, which you can then configure your dashboard to use this as its backend.
-
-`mihoro` manages dashboard source via top-level `ui` config, which defaults to `metacubexd` and also supports `zashboard`, `yacd-meta`, or `custom:download_url`. The downloaded static files are placed into `mihomo_config.external_ui`. In this case, `mihomo` will serve the dashboard locally under `{external_controller}/ui`. Please refer to the official documentation of mihomo for more information: [docs/external_controller](https://wiki.metacubex.one/config/general/#api), [docs/external_ui](https://wiki.metacubex.one/config/general/#_7).
-
-## License
-
-[MIT](LICENSE)
+The real systemd/TUN scripts intentionally require an isolated rootful host.
+They mutate only Mihoto fixtures under `/etc`, `/usr/local/bin`, and
+`/etc/systemd/system`, then check cleanup. A missing root/systemd/TUN
+prerequisite is a blocked acceptance result, never a pass.
