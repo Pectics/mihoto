@@ -31,6 +31,7 @@ for required in \
 	'id-token: write' \
 	'SHA256SUMS' \
 	'attest-build-provenance' \
+	'libgcc-s1-arm64-cross' \
 	'audit-acceptance' \
 	'docs/audits/v1.0.0.md' \
 	'needs: [validate, quality, assemble, attest, audit-acceptance]' \
