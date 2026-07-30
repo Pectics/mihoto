@@ -8,7 +8,7 @@ workflow=.github/workflows/release.yml
 test -f "$workflow"
 grep -Fq 'v*.*.*' "$workflow"
 grep -Fq 'v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?' "$workflow"
-grep -Fq 'version = "1.0.0-rc.1"' Cargo.toml
+grep -Fq 'version = "1.0.0"' Cargo.toml
 
 for target in \
 	'x86_64-unknown-linux-gnu' \
