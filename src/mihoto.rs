@@ -749,6 +749,21 @@ mod tests {
         program
     }
 
+    fn fake_mihomo(dir: &Path, validation_exit: i32) -> PathBuf {
+        let program = dir.join("mihomo");
+        let log = dir.join("mihomo.log");
+        fs::write(
+			&program,
+			format!(
+				"#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\n  -t) exit {validation_exit} ;;\n  *) exit 0 ;;\nesac\n",
+				log.display()
+			),
+		)
+		.unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        program
+    }
+
     #[test]
     fn system_service_has_tun_capabilities() {
         let unit = render_service_string("/usr/local/bin/mihomo", "/etc/mihomo");
@@ -802,6 +817,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn semantically_invalid_remote_config_does_not_replace_existing_config() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/config.yaml"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "proxies:\n  - name: broken\n    type: invalid\nrules:\n  - MATCH,broken\n",
+            ))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let original = "tun:\n  enable: true\nrules:\n  - MATCH,DIRECT\n";
+        let config_path = dir.path().join("config.yaml");
+        fs::write(&config_path, original).unwrap();
+        let mihomo_binary = fake_mihomo(dir.path(), 1);
+
+        let config = Config {
+            remote_config_url: format!("{}/config.yaml", server.uri()),
+            mihomo_binary_path: mihomo_binary.display().to_string(),
+            mihomo_config_root: dir.path().display().to_string(),
+            ..Config::default()
+        };
+        let mihoto = Mihoto::from_config(config);
+
+        assert!(mihoto.update_config(&Client::new()).await.is_err());
+        assert_eq!(fs::read_to_string(config_path).unwrap(), original);
+        let calls = fs::read_to_string(dir.path().join("mihomo.log")).unwrap();
+        assert!(calls.contains("-t"));
+        assert!(calls.contains("-d"));
+        assert!(calls.contains("-f"));
+    }
+
+    #[tokio::test]
     async fn updated_remote_config_is_private() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -814,8 +862,10 @@ mod tests {
             .await;
 
         let dir = tempfile::tempdir().unwrap();
+        let mihomo_binary = fake_mihomo(dir.path(), 0);
         let config = Config {
             remote_config_url: format!("{}/config.yaml", server.uri()),
+            mihomo_binary_path: mihomo_binary.display().to_string(),
             mihomo_config_root: dir.path().display().to_string(),
             ..Config::default()
         };
@@ -827,6 +877,23 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn semantically_invalid_override_does_not_replace_existing_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = "tun:\n  enable: true\nrules:\n  - MATCH,DIRECT\n";
+        let config_path = dir.path().join("config.yaml");
+        fs::write(&config_path, original).unwrap();
+        let mihomo_binary = fake_mihomo(dir.path(), 1);
+        let mut config = Config::default();
+        config.mihomo_binary_path = mihomo_binary.display().to_string();
+        config.mihomo_config_root = dir.path().display().to_string();
+        config.mihomo_config.mixed_port = Some(17890);
+        let mihoto = Mihoto::from_config(config);
+
+        assert!(mihoto.apply_existing_config_atomically().is_err());
+        assert_eq!(fs::read_to_string(config_path).unwrap(), original);
     }
 
     #[tokio::test]
