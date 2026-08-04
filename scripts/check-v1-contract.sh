@@ -25,8 +25,8 @@ for required in \
 	'x86_64-unknown-linux-musl' \
 	'aarch64-unknown-linux-gnu' \
 	'aarch64-unknown-linux-musl' \
-	'Ubuntu 22.04' \
 	'Ubuntu 24.04' \
+	'GitHub-hosted' \
 	'not supported' \
 	'not migrated automatically' \
 	'uninstall --purge' \

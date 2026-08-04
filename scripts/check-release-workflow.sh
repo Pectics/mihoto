@@ -12,6 +12,7 @@ audit_record="docs/audits/v${version}.md"
 test -f "$workflow"
 test -f "$real_host_workflow"
 test -f "$audit_record"
+test ! -e .github/workflows/systemd-integration.yml
 grep -Fq 'v*.*.*' "$workflow"
 grep -Fq 'v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?' "$workflow"
 grep -Fq "version = \"$version\"" Cargo.toml
@@ -45,21 +46,23 @@ for required in \
 	'--prerelease' \
 	'--latest' \
 	'git merge-base --is-ancestor' \
-	'Real-host acceptance: PASS' \
+	'Hosted systemd/TUN acceptance: PASS' \
 	'Release decision: Accepted'; do
 	grep -Fq -- "$required" "$workflow"
 done
 grep -Fq -- 'audit="docs/audits/v${VERSION}.md"' "$workflow"
 
-if grep -Fq 'runs-on: [self-hosted' "$workflow"; then
-	echo 'release publication must not wait forever on unregistered runners' >&2
+if grep -R -n -- 'self-hosted' .github/workflows; then
+	echo 'public repository workflows must not execute on self-hosted runners' >&2
 	exit 1
 fi
 
 for required in \
 	'workflow_dispatch:' \
-	'runs-on: [self-hosted, linux, systemd, tun, x64]' \
-	'runs-on: [self-hosted, linux, systemd, tun, arm64]' \
+	'runs-on: ubuntu-24.04' \
+	'runs-on: ubuntu-24.04-arm' \
+	'Install stable Mihomo fixture' \
+	'/usr/local/libexec/mihoto-test/mihomo' \
 	'scripts/test-systemd-integration.sh' \
 	'scripts/test-tun-integration.sh'; do
 	grep -Fq -- "$required" "$real_host_workflow"

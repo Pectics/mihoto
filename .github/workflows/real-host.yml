@@ -1,4 +1,4 @@
-name: Real host acceptance
+name: GitHub-hosted systemd and TUN acceptance
 
 on:
   workflow_dispatch:
@@ -13,8 +13,8 @@ permissions:
 
 jobs:
   x86_64:
-    name: Validate systemd and TUN on x86_64
-    runs-on: [self-hosted, linux, systemd, tun, x64]
+    name: Validate systemd and TUN on GitHub-hosted x86_64
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -22,6 +22,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
         with:
           toolchain: 1.88.0
+      - name: Install stable Mihomo fixture
+        run: |
+          set -eu
+          version="$(curl -fsSL https://github.com/MetaCubeX/mihomo/releases/latest/download/version.txt | tr -d '\r\n')"
+          test -n "$version"
+          temporary_dir="$(mktemp -d)"
+          trap 'rm -rf "$temporary_dir"' EXIT
+          curl -fsSL "https://github.com/MetaCubeX/mihomo/releases/latest/download/mihomo-linux-amd64-${version}.gz" |
+            gzip -d > "$temporary_dir/mihomo"
+          test -s "$temporary_dir/mihomo"
+          "$temporary_dir/mihomo" -v
+          sudo install -D -m 0755 "$temporary_dir/mihomo" /usr/local/libexec/mihoto-test/mihomo
       - run: cargo build --locked --release
       - name: Exercise real systemd lifecycle
         run: sudo env MIHOTO_SYSTEMD_INTEGRATION=1 MIHOTO_ALLOW_SYSTEMD_MUTATION=1 MIHOTO_REAL_MIHOMO=/usr/local/libexec/mihoto-test/mihomo scripts/test-systemd-integration.sh
@@ -29,8 +41,8 @@ jobs:
         run: sudo env MIHOTO_TUN_INTEGRATION=1 MIHOTO_ALLOW_SYSTEMD_MUTATION=1 MIHOTO_REAL_MIHOMO=/usr/local/libexec/mihoto-test/mihomo scripts/test-tun-integration.sh
 
   aarch64:
-    name: Validate systemd and TUN on aarch64
-    runs-on: [self-hosted, linux, systemd, tun, arm64]
+    name: Validate systemd and TUN on GitHub-hosted aarch64
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -38,6 +50,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
         with:
           toolchain: 1.88.0
+      - name: Install stable Mihomo fixture
+        run: |
+          set -eu
+          version="$(curl -fsSL https://github.com/MetaCubeX/mihomo/releases/latest/download/version.txt | tr -d '\r\n')"
+          test -n "$version"
+          temporary_dir="$(mktemp -d)"
+          trap 'rm -rf "$temporary_dir"' EXIT
+          curl -fsSL "https://github.com/MetaCubeX/mihomo/releases/latest/download/mihomo-linux-arm64-${version}.gz" |
+            gzip -d > "$temporary_dir/mihomo"
+          test -s "$temporary_dir/mihomo"
+          "$temporary_dir/mihomo" -v
+          sudo install -D -m 0755 "$temporary_dir/mihomo" /usr/local/libexec/mihoto-test/mihomo
       - run: cargo build --locked --release
       - name: Exercise real systemd lifecycle
         run: sudo env MIHOTO_SYSTEMD_INTEGRATION=1 MIHOTO_ALLOW_SYSTEMD_MUTATION=1 MIHOTO_REAL_MIHOMO=/usr/local/libexec/mihoto-test/mihomo scripts/test-systemd-integration.sh

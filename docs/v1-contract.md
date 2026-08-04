@@ -14,10 +14,12 @@ core use case, not as an experimental integration. The release targets are:
 - `aarch64-unknown-linux-gnu`
 - `aarch64-unknown-linux-musl`
 
-Ubuntu 22.04 and Ubuntu 24.04 are the required x86_64 acceptance hosts. At
-least one native or virtualized aarch64 systemd Linux host must pass install,
-service startup, and TUN acceptance before a stable release. QEMU version
-detection alone is not acceptance evidence.
+The release acceptance workflow uses GitHub-hosted Ubuntu 24.04 x86_64 and
+Ubuntu 24.04 arm64 virtual machines. Both must pass install, service startup,
+and TUN acceptance before a stable release. The workflow provisions a real
+Mihomo fixture and validates systemd, TUN routing, DNS/controller reachability,
+firewall state, and cleanup; a missing hosted-runner prerequisite is blocked,
+never treated as a pass.
 
 Non-systemd Linux, unprivileged containers, Android, BSD, macOS, and Windows
 are not supported. i686 is not a v1 target.
@@ -73,8 +75,8 @@ unchanged on any failure. `upgrade --check` has no write path.
 
 Every release contains the four named archives, `SHA256SUMS`, and a GitHub
 attestation/provenance record. A release job can consume only artifacts that
-passed the local gates, target smoke tests, and real x86_64 plus aarch64
-systemd/TUN gates.
+passed the local gates, target smoke tests, and GitHub-hosted x86_64 plus
+aarch64 systemd/TUN gates.
 
 ## Migration and compatibility
 

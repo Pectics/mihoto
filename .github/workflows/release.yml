@@ -198,7 +198,7 @@ jobs:
           subject-path: release-artifacts/*
 
   audit-acceptance:
-    name: Verify recorded host acceptance and release decision
+    name: Verify recorded hosted systemd/TUN acceptance and release decision
     needs: [validate, quality]
     runs-on: ubuntu-24.04
     steps:
@@ -219,7 +219,7 @@ jobs:
           git merge-base --is-ancestor "$tested_commit" "$GITHUB_SHA"
           grep -Fq "Release tag: \`$TAG\`" "$audit"
           grep -Fq "Package version: \`$VERSION\`" "$audit"
-          grep -Fq 'Real-host acceptance: PASS' "$audit"
+          grep -Fq 'Hosted systemd/TUN acceptance: PASS' "$audit"
           grep -Fq 'Release decision: Accepted' "$audit"
           grep -Fq 'Required from the tag workflow' "$audit"
 

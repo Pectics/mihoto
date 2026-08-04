@@ -15,10 +15,10 @@ Mihoto supports systemd Linux only. The release artifacts are:
 - `aarch64-unknown-linux-gnu`
 - `aarch64-unknown-linux-musl`
 
-Release acceptance covers Ubuntu 22.04 and Ubuntu 24.04 on x86_64, plus a
-separate native or virtualized aarch64 systemd/TUN host. Containers without the
-required privileges, non-systemd Linux, Android, BSD, macOS, and Windows are
-not supported.
+Release acceptance uses GitHub-hosted Ubuntu 24.04 x86_64 and Ubuntu 24.04
+arm64 virtual machines for systemd/TUN lifecycle checks. Containers without
+the required privileges, non-systemd Linux, Android, BSD, macOS, and Windows
+are not supported.
 
 ## Install
 
