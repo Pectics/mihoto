@@ -32,6 +32,7 @@ jobs:
           curl -fsSL "https://github.com/MetaCubeX/mihomo/releases/latest/download/mihomo-linux-amd64-${version}.gz" |
             gzip -d > "$temporary_dir/mihomo"
           test -s "$temporary_dir/mihomo"
+          chmod 0755 "$temporary_dir/mihomo"
           "$temporary_dir/mihomo" -v
           sudo install -D -m 0755 "$temporary_dir/mihomo" /usr/local/libexec/mihoto-test/mihomo
       - run: cargo build --locked --release
@@ -60,6 +61,7 @@ jobs:
           curl -fsSL "https://github.com/MetaCubeX/mihomo/releases/latest/download/mihomo-linux-arm64-${version}.gz" |
             gzip -d > "$temporary_dir/mihomo"
           test -s "$temporary_dir/mihomo"
+          chmod 0755 "$temporary_dir/mihomo"
           "$temporary_dir/mihomo" -v
           sudo install -D -m 0755 "$temporary_dir/mihomo" /usr/local/libexec/mihoto-test/mihomo
       - run: cargo build --locked --release
