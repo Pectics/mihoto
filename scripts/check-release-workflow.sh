@@ -51,6 +51,8 @@ for required in \
 	grep -Fq -- "$required" "$workflow"
 done
 grep -Fq -- 'audit="docs/audits/v${VERSION}.md"' "$workflow"
+audit_job="$(sed -n '/^  audit-acceptance:/,/^  release:/p' "$workflow")"
+printf '%s\n' "$audit_job" | grep -Fq -- 'fetch-depth: 0'
 
 if grep -R -n -- 'self-hosted' .github/workflows; then
 	echo 'public repository workflows must not execute on self-hosted runners' >&2
