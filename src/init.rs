@@ -8,6 +8,7 @@ use anyhow::{bail, Result};
 use colored::Colorize;
 use dialoguer::Input;
 use reqwest::Client;
+use serde_yaml::Value as YamlValue;
 
 pub struct InitOptions {
     pub force: bool,
@@ -93,14 +94,27 @@ impl StageReport {
 // Dashboard URL helper
 // ---------------------------------------------------------------------------
 
-fn dashboard_url(config: &Config) -> Option<String> {
-    let controller = config.mihomo_config.external_controller.as_deref()?;
+fn dashboard_url(config: &Config, mihomo_config_path: &str) -> Option<String> {
+    let controller = config
+        .mihomo_config
+        .external_controller
+        .clone()
+        .or_else(|| remote_string_field(mihomo_config_path, "external-controller"))?;
     let (host, port) = controller.rsplit_once(':')?;
     let host = match host {
         "0.0.0.0" | "[::]" | "" => "127.0.0.1",
         h => h,
     };
     Some(format!("http://{host}:{port}/ui/"))
+}
+
+fn remote_string_field(path: &str, key: &str) -> Option<String> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let value: YamlValue = serde_yaml::from_str(&raw).ok()?;
+    value
+        .get(key)
+        .and_then(YamlValue::as_str)
+        .map(str::to_owned)
 }
 
 // ---------------------------------------------------------------------------
@@ -329,7 +343,7 @@ pub async fn run(config_path: &str, client: &Client, opts: InitOptions) -> Resul
 
     // Print dashboard URL if UI is configured
     if config.ui.is_some() {
-        if let Some(url) = dashboard_url(&config) {
+        if let Some(url) = dashboard_url(&config, &mihoto.mihomo_target_config_path) {
             println!();
             println!("  {}: {}", "Dashboard".bold(), url.underline().cyan());
             let ui_name = config
@@ -360,4 +374,129 @@ pub async fn run(config_path: &str, client: &Client, opts: InitOptions) -> Resul
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::MihomoConfig;
+    use anyhow::anyhow;
+    use std::fs;
+
+    #[tokio::test]
+    async fn stage_report_records_all_statuses_and_failure_queries() {
+        let mut report = StageReport::new();
+        report.begin("fixture", Some("testing stage output"));
+        report.record("installed", StageStatus::Installed);
+        report.record("skipped", StageStatus::Skipped("already done".into()));
+        report
+            .run("successful", None, || async { Ok(StageStatus::Installed) })
+            .await;
+        report
+            .run("failed", None, || async { Err(anyhow!("fixture failure")) })
+            .await;
+
+        assert!(report.has_failures());
+        assert!(report.stage_failed("failed"));
+        assert!(!report.stage_failed("missing"));
+        report.print();
+    }
+
+    #[test]
+    fn bootstrap_config_requires_url_in_yes_mode_and_loads_existing_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing_url = dir.path().join("missing-url.toml");
+        assert!(bootstrap_config(missing_url.to_str().unwrap(), true).is_err());
+        assert!(missing_url.exists());
+
+        let configured_path = dir.path().join("configured.toml");
+        let mut configured = Config {
+            remote_config_url: "https://example.test/config.yaml".into(),
+            ..Config::default()
+        };
+        configured.write(&configured_path).unwrap();
+        let loaded = bootstrap_config(configured_path.to_str().unwrap(), true).unwrap();
+        assert_eq!(loaded.remote_config_url, "https://example.test/config.yaml");
+    }
+
+    #[tokio::test]
+    async fn init_aborts_install_phases_when_remote_config_stage_fails() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/config.yaml"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("tun: [invalid"))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let binary_path = dir.path().join("mihomo");
+        fs::write(&binary_path, "existing binary").unwrap();
+        let config_path = dir.path().join("mihoto.toml");
+        let config = Config {
+            remote_config_url: format!("{}/config.yaml", server.uri()),
+            ui: None,
+            mihomo_binary_path: binary_path.display().to_string(),
+            mihomo_config_root: dir.path().join("mihomo-config").display().to_string(),
+            ..Config::default()
+        };
+        let mut writable = config.clone();
+        writable.write(&config_path).unwrap();
+
+        let error = run(
+            config_path.to_str().unwrap(),
+            &Client::new(),
+            InitOptions {
+                force: true,
+                arch: None,
+                yes: true,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("one or more stages failed"));
+        assert!(!dir.path().join("mihomo-config/config.yaml").exists());
+        assert_eq!(fs::read_to_string(&binary_path).unwrap(), "existing binary");
+    }
+
+    #[test]
+    fn dashboard_url_prefers_local_controller_and_normalizes_wildcards() {
+        let dir = tempfile::tempdir().unwrap();
+        let remote_path = dir.path().join("config.yaml");
+        fs::write(&remote_path, "external-controller: 0.0.0.0:9090\n").unwrap();
+        let mut config = Config::default();
+
+        assert_eq!(
+            dashboard_url(&config, remote_path.to_str().unwrap()).as_deref(),
+            Some("http://127.0.0.1:9090/ui/")
+        );
+
+        config.mihomo_config = MihomoConfig {
+            external_controller: Some("[::1]:19090".into()),
+            ..MihomoConfig::default()
+        };
+        assert_eq!(
+            dashboard_url(&config, remote_path.to_str().unwrap()).as_deref(),
+            Some("http://[::1]:19090/ui/")
+        );
+    }
+
+    #[test]
+    fn dashboard_url_rejects_missing_or_malformed_controller_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let remote_path = dir.path().join("config.yaml");
+        let config = Config::default();
+
+        fs::write(&remote_path, "external-controller: 127.0.0.1\n").unwrap();
+        assert!(dashboard_url(&config, remote_path.to_str().unwrap()).is_none());
+
+        fs::write(&remote_path, "external-controller: [broken\n").unwrap();
+        assert!(dashboard_url(&config, remote_path.to_str().unwrap()).is_none());
+
+        assert!(dashboard_url(&config, "/nonexistent/config.yaml").is_none());
+    }
 }

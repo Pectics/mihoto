@@ -262,6 +262,7 @@ fn atomic_replace(candidate: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     fn release(tag_name: &str, prerelease: bool, draft: bool) -> Release {
         Release {
@@ -303,11 +304,82 @@ mod tests {
         let sums = concat!(
 			"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  mihoto-v1.0.0-x86_64-unknown-linux-gnu.tar.gz\n",
 			"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  mihoto-v1.0.0-aarch64-unknown-linux-gnu.tar.gz\n",
-		);
+        );
         assert_eq!(
             checksum_for_asset(sums, "mihoto-v1.0.0-x86_64-unknown-linux-gnu.tar.gz").unwrap(),
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         );
         assert!(checksum_for_asset(sums, "mihoto-v1.0.0").is_err());
+    }
+
+    #[test]
+    fn checksum_validation_handles_case_star_duplicates_and_bad_values() {
+        let asset = "mihoto-v1.0.0-x86_64-unknown-linux-gnu.tar.gz";
+        let upper = "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789";
+        assert_eq!(
+            checksum_for_asset(&format!("{upper}  *{asset}\n"), asset).unwrap(),
+            upper.to_ascii_lowercase()
+        );
+        assert!(
+            checksum_for_asset(&format!("{upper}  {asset}\n{upper}  {asset}\n"), asset).is_err()
+        );
+        assert!(checksum_for_asset(&format!("short  {asset}\n"), asset).is_err());
+        assert!(checksum_for_asset(&format!("{}  {asset}\n", "z".repeat(64)), asset).is_err());
+    }
+
+    #[test]
+    fn release_asset_lookup_and_archive_checksum_are_verified() {
+        let asset = ReleaseAsset {
+            name: "mihoto-v1.0.0-x86_64-unknown-linux-gnu.tar.gz".into(),
+            browser_download_url: "https://example.test/mihoto.tar.gz".into(),
+        };
+        let release = Release {
+            tag_name: "v1.0.0".into(),
+            prerelease: false,
+            draft: false,
+            assets: vec![asset.clone()],
+        };
+        assert_eq!(find_asset(&release, &asset.name).unwrap().name, asset.name);
+        assert!(find_asset(&release, CHECKSUMS_NAME).is_err());
+
+        let archive = b"release archive";
+        let expected = format!("{:x}", Sha256::digest(archive));
+        assert!(verify_checksum(&expected, archive).is_ok());
+        assert!(verify_checksum(&"0".repeat(64), archive).is_err());
+    }
+
+    fn gzip_archive(entries: &[(&str, &[u8], bool)]) -> Vec<u8> {
+        let mut tar = tar::Builder::new(Vec::new());
+        for (path, contents, directory) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_path(path).unwrap();
+            header.set_size(contents.len() as u64);
+            if *directory {
+                header.set_entry_type(tar::EntryType::Directory);
+            }
+            header.set_cksum();
+            tar.append_data(&mut header, path, *contents).unwrap();
+        }
+        let tar_bytes = tar.into_inner().unwrap();
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gzip.write_all(&tar_bytes).unwrap();
+        gzip.finish().unwrap()
+    }
+
+    #[test]
+    fn extract_binary_accepts_one_file_and_rejects_unsafe_archive_shapes() {
+        let dir = tempfile::tempdir().unwrap();
+        let valid = gzip_archive(&[("mihoto", b"binary", false)]);
+        let extracted = extract_binary(&valid, dir.path()).unwrap();
+        assert_eq!(fs::read(extracted).unwrap(), b"binary");
+
+        for archive in [
+            gzip_archive(&[("other", b"binary", false)]),
+            gzip_archive(&[("mihoto", b"", true)]),
+            gzip_archive(&[("mihoto", b"one", false), ("mihoto", b"two", false)]),
+            gzip_archive(&[]),
+        ] {
+            assert!(extract_binary(&archive, dir.path()).is_err());
+        }
     }
 }

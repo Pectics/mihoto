@@ -70,18 +70,18 @@ printf '%s\n' \
 	'ipv6 = false' \
 	'external_controller = "127.0.0.1:19090"' \
 	'external_ui = "ui"' \
+	'' \
+	'[mihomo_config.tun]' \
+	'enable = true' \
+	'stack = "system"' \
+	'device = "mihoto-tun0"' \
+	'auto_route = true' \
+	'auto_redirect = true' \
+	'auto_detect_interface = true' \
+	'route_address = ["198.18.0.0/15"]' \
 	> /etc/mihoto.toml
 chmod 0600 /etc/mihoto.toml
 printf '%s\n' \
-	'tun:' \
-	'  enable: true' \
-	'  stack: system' \
-	'  device: mihoto-tun0' \
-	'  auto-route: true' \
-	'  auto-redirect: true' \
-	'  auto-detect-interface: true' \
-	'  route-address:' \
-	'    - 198.18.0.0/15' \
 	'proxies: []' \
 	'proxy-groups: []' \
 	'rules:' \

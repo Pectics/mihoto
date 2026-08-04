@@ -72,6 +72,57 @@ fn read_only_commands_do_not_need_config_or_real_systemd() {
 
 #[cfg(unix)]
 #[test]
+fn service_commands_use_systemctl_and_completion_shells_render() {
+    if unsafe { libc::geteuid() } != 0 {
+        return;
+    }
+
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let systemctl = dir.path().join("systemctl");
+    let calls = dir.path().join("calls");
+    fs::write(
+        &systemctl,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 0\n",
+            calls.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        dir.path().display(),
+        std::env::var("PATH").unwrap()
+    );
+
+    for command in ["start", "stop", "restart", "status"] {
+        Command::cargo_bin("mihoto")
+            .unwrap()
+            .args(["--config", "/missing/mihoto.toml", command])
+            .env("PATH", &path)
+            .assert()
+            .success();
+    }
+    for shell in ["zsh", "fish"] {
+        Command::cargo_bin("mihoto")
+            .unwrap()
+            .args(["--config", "/missing/mihoto.toml", "completions", shell])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("mihoto"));
+    }
+
+    let calls = fs::read_to_string(calls).unwrap();
+    for command in ["start", "stop", "restart", "status"] {
+        assert!(calls.contains(&format!("{command} mihomo.service")));
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn a_fake_id_command_cannot_bypass_the_root_guard() {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;

@@ -126,3 +126,69 @@ impl Systemctl {
             .with_context(|| format!("invalid systemd {property} value `{}`", value.trim()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        fs,
+        os::unix::fs::PermissionsExt,
+        path::{Path, PathBuf},
+    };
+
+    fn fake_systemctl(dir: &Path) -> PathBuf {
+        let program = dir.join("systemctl");
+        fs::write(
+            &program,
+            "#!/bin/sh\ncase \"$1\" in\n  is-active|is-enabled) exit 0 ;;\n  show) printf '42\\n' ;;\n  *) exit 0 ;;\nesac\n",
+        )
+        .unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        program
+    }
+
+    #[test]
+    fn builder_queries_and_error_paths_are_exercised() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = fake_systemctl(dir.path());
+        let mut systemctl = Systemctl::with_program(&program);
+        systemctl
+            .enable("mihomo.service")
+            .enable_now("mihomo.service")
+            .disable_now("mihomo.service")
+            .start("mihomo.service")
+            .stop("mihomo.service")
+            .restart("mihomo.service")
+            .status("mihomo.service")
+            .daemon_reload()
+            .reset_failed("mihomo.service");
+        assert!(systemctl.execute().unwrap().success());
+        assert!(Systemctl::is_active_with_program(
+            &program,
+            "mihomo.service"
+        ));
+        assert!(Systemctl::is_enabled_with_program(
+            &program,
+            "mihomo.service"
+        ));
+        assert_eq!(
+            Systemctl::property_u64_with_program(&program, "mihomo.service", "NRestarts").unwrap(),
+            42
+        );
+
+        assert!(Systemctl::with_program(Path::new("/bin/false"))
+            .status("mihomo.service")
+            .execute()
+            .is_err());
+        assert!(!Systemctl::is_active_with_program(
+            Path::new("/bin/false"),
+            "mihomo.service"
+        ));
+        assert!(Systemctl::property_u64_with_program(
+            Path::new("/bin/false"),
+            "mihomo.service",
+            "NRestarts"
+        )
+        .is_err());
+    }
+}

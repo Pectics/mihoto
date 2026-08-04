@@ -331,4 +331,35 @@ mod tests {
         assert!(error.contains("Did you mean"));
         assert!(error.contains("amd64"));
     }
+
+    #[tokio::test]
+    async fn configured_binary_url_bypasses_architecture_and_version_lookup() {
+        let config = Config {
+            remote_mihomo_binary_url: Some("https://example.test/mihomo.gz".into()),
+            ..Config::default()
+        };
+        let resolved = resolve_binary(&Client::new(), &config, Some("invalid"), "test:")
+            .await
+            .unwrap();
+        assert_eq!(resolved.url, "https://example.test/mihomo.gz");
+        assert!(resolved.version.is_none());
+        assert_eq!(
+            resolve_binary_url(&Client::new(), &config, None, "test:")
+                .await
+                .unwrap(),
+            "https://example.test/mihomo.gz"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_configured_architecture_is_rejected_before_network_access() {
+        let config = Config {
+            mihomo_arch: Some("not-an-arch".into()),
+            ..Config::default()
+        };
+        let error = resolve_binary(&Client::new(), &config, None, "test:")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("unsupported architecture"));
+    }
 }

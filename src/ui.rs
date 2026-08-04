@@ -241,7 +241,22 @@ mod tests {
             Ui::parse("custom:https://example.com/ui.tar.gz")?,
             Ui::Custom("https://example.com/ui.tar.gz".to_string())
         );
+        assert_eq!(
+            Ui::Custom("https://example.com/ui.tar.gz".into()).as_config_value(),
+            "https://example.com/ui.tar.gz"
+        );
+        assert_eq!(
+            Ui::Custom("https://example.com/ui.tar.gz".into()).download_url(),
+            "https://example.com/ui.tar.gz"
+        );
         Ok(())
+    }
+
+    #[test]
+    fn test_ui_parse_rejects_empty_and_unsupported_values() {
+        for value in ["", "   ", "custom:", "unknown"] {
+            assert!(Ui::parse(value).is_err(), "`{value}` should be rejected");
+        }
     }
 
     #[test]
@@ -270,6 +285,16 @@ mod tests {
             resolve_external_ui_path("/tmp/mihomo", "/var/www/ui"),
             PathBuf::from("/var/www/ui")
         );
+    }
+
+    #[test]
+    fn test_find_archive_root_rejects_multiple_entries_and_files() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(find_archive_root(dir.path()).is_err());
+        fs::write(dir.path().join("file"), "not a directory").unwrap();
+        assert!(find_archive_root(dir.path()).is_err());
+        fs::create_dir(dir.path().join("root")).unwrap();
+        assert!(find_archive_root(dir.path()).is_err());
     }
 
     #[test]

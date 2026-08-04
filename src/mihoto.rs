@@ -20,6 +20,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use colored::Colorize;
 use reqwest::Client;
+use serde_yaml::Value as YamlValue;
 use tempfile::NamedTempFile;
 
 const SERVICE_HEALTH_DELAY: Duration = Duration::from_secs(5);
@@ -389,18 +390,24 @@ impl Mihoto {
                 return Ok(StageStatus::Skipped("geodata present".to_string()));
             }
             if force || !geoip_path.exists() {
+                let geoip_url = geox_url.geoip.as_deref().ok_or_else(|| {
+                    anyhow!("`geox_url.geoip` is required when geodata_mode is enabled")
+                })?;
                 download_file(
                     client,
-                    &geox_url.geoip,
+                    geoip_url,
                     &geoip_path,
                     &self.config.mihoto_user_agent,
                 )
                 .await?;
             }
             if force || !geosite_path.exists() {
+                let geosite_url = geox_url.geosite.as_deref().ok_or_else(|| {
+                    anyhow!("`geox_url.geosite` is required when geodata_mode is enabled")
+                })?;
                 download_file(
                     client,
-                    &geox_url.geosite,
+                    geosite_url,
                     &geosite_path,
                     &self.config.mihoto_user_agent,
                 )
@@ -411,13 +418,10 @@ impl Mihoto {
             if !force && mmdb_path.exists() {
                 return Ok(StageStatus::Skipped("geodata present".to_string()));
             }
-            download_file(
-                client,
-                &geox_url.mmdb,
-                &mmdb_path,
-                &self.config.mihoto_user_agent,
-            )
-            .await?;
+            let mmdb_url = geox_url.mmdb.as_deref().ok_or_else(|| {
+                anyhow!("`geox_url.mmdb` is required when geodata_mode is disabled")
+            })?;
+            download_file(client, mmdb_url, &mmdb_path, &self.config.mihoto_user_agent).await?;
         }
 
         Ok(StageStatus::Installed)
@@ -601,24 +605,33 @@ impl Mihoto {
             // Download geodata files based on `geodata_mode`
             let geodata_mode = self.config.mihomo_config.geodata_mode.unwrap_or(false);
             if geodata_mode {
+                let geoip_url = geox_url.geoip.as_deref().ok_or_else(|| {
+                    anyhow!("`geox_url.geoip` is required when geodata_mode is enabled")
+                })?;
                 download_file(
                     client,
-                    &geox_url.geoip,
+                    geoip_url,
                     &Path::new(&self.mihomo_target_config_root).join("geoip.dat"),
                     &self.config.mihoto_user_agent,
                 )
                 .await?;
+                let geosite_url = geox_url.geosite.as_deref().ok_or_else(|| {
+                    anyhow!("`geox_url.geosite` is required when geodata_mode is enabled")
+                })?;
                 download_file(
                     client,
-                    &geox_url.geosite,
+                    geosite_url,
                     &Path::new(&self.mihomo_target_config_root).join("geosite.dat"),
                     &self.config.mihoto_user_agent,
                 )
                 .await?;
             } else {
+                let mmdb_url = geox_url.mmdb.as_deref().ok_or_else(|| {
+                    anyhow!("`geox_url.mmdb` is required when geodata_mode is disabled")
+                })?;
                 download_file(
                     client,
-                    &geox_url.mmdb,
+                    mmdb_url,
                     &Path::new(&self.mihomo_target_config_root).join("country.mmdb"),
                     &self.config.mihoto_user_agent,
                 )
@@ -772,13 +785,26 @@ impl Mihoto {
     }
 
     fn external_ui_target_dir(&self) -> Option<PathBuf> {
-        self.config
+        let external_ui = self
+            .config
             .mihomo_config
             .external_ui
-            .as_deref()
-            .map(|external_ui| {
-                resolve_external_ui_path(&self.mihomo_target_config_root, external_ui)
-            })
+            .clone()
+            .or_else(|| self.remote_external_ui())
+            .or_else(|| self.config.ui.as_ref().map(|_| String::from("ui")))?;
+        Some(resolve_external_ui_path(
+            &self.mihomo_target_config_root,
+            &external_ui,
+        ))
+    }
+
+    fn remote_external_ui(&self) -> Option<String> {
+        let raw = fs::read_to_string(&self.mihomo_target_config_path).ok()?;
+        let value: YamlValue = serde_yaml::from_str(&raw).ok()?;
+        value
+            .get("external-ui")
+            .and_then(YamlValue::as_str)
+            .map(str::to_owned)
     }
 }
 
@@ -902,7 +928,10 @@ WantedBy=multi-user.target",
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mihomo_config::GeoxUrl;
+    use crate::ui::Ui;
     use std::{
+        io::Write,
         os::unix::fs::PermissionsExt,
         path::{Path, PathBuf},
     };
@@ -977,6 +1006,22 @@ mod tests {
         program
     }
 
+    fn dashboard_archive() -> Vec<u8> {
+        let mut tar = tar::Builder::new(Vec::new());
+        let content = b"<!doctype html><title>mihoto dashboard</title>";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("dashboard/index.html").unwrap();
+        header.set_size(content.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append(&header, &content[..]).unwrap();
+        let tar_bytes = tar.into_inner().unwrap();
+
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gzip.write_all(&tar_bytes).unwrap();
+        gzip.finish().unwrap()
+    }
+
     #[test]
     fn system_service_has_tun_capabilities() {
         let unit = render_service_string("/usr/local/bin/mihomo", "/etc/mihomo");
@@ -1005,6 +1050,38 @@ mod tests {
         assert!(escaped.contains("ExecStart=\"/opt/mihomo core\" -d \"/etc/mihomo config\""));
     }
 
+    #[test]
+    fn ui_asset_target_respects_local_remote_and_default_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config {
+            mihomo_config_root: dir.path().display().to_string(),
+            ..Config::default()
+        };
+        let mihoto = Mihoto::from_config(config.clone());
+        assert_eq!(
+            mihoto.external_ui_target_dir().unwrap(),
+            dir.path().join("ui")
+        );
+
+        fs::write(
+            dir.path().join("config.yaml"),
+            "external-ui: remote-dashboard\n",
+        )
+        .unwrap();
+        let mihoto = Mihoto::from_config(config.clone());
+        assert_eq!(
+            mihoto.external_ui_target_dir().unwrap(),
+            dir.path().join("remote-dashboard")
+        );
+
+        config.mihomo_config.external_ui = Some("/srv/dashboard".into());
+        let mihoto = Mihoto::from_config(config);
+        assert_eq!(
+            mihoto.external_ui_target_dir().unwrap(),
+            PathBuf::from("/srv/dashboard")
+        );
+    }
+
     #[tokio::test]
     async fn invalid_remote_config_does_not_replace_existing_config() {
         let server = MockServer::start().await;
@@ -1027,6 +1104,147 @@ mod tests {
         let mihoto = Mihoto::from_config(config);
         assert!(mihoto.update_config(&Client::new()).await.is_err());
         assert_eq!(fs::read_to_string(config_path).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn geodata_manager_covers_download_skip_update_and_missing_url_paths() {
+        let server = MockServer::start().await;
+        for endpoint in ["/geoip.dat", "/geosite.dat", "/country.mmdb"] {
+            Mock::given(method("GET"))
+                .and(path(endpoint))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(endpoint.as_bytes()))
+                .mount(&server)
+                .await;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config {
+            mihomo_config_root: dir.path().display().to_string(),
+            ..Config::default()
+        };
+        config.mihomo_config.geodata_mode = Some(true);
+        config.mihomo_config.geox_url = Some(GeoxUrl {
+            geoip: Some(format!("{}/geoip.dat", server.uri())),
+            geosite: Some(format!("{}/geosite.dat", server.uri())),
+            mmdb: Some(format!("{}/country.mmdb", server.uri())),
+            asn: None,
+        });
+        let mihoto = Mihoto::from_config(config.clone());
+
+        assert!(matches!(
+            mihoto.ensure_geodata(&Client::new(), false).await.unwrap(),
+            StageStatus::Installed
+        ));
+        assert_eq!(
+            fs::read(dir.path().join("geoip.dat")).unwrap(),
+            b"/geoip.dat"
+        );
+        assert!(matches!(
+            mihoto.ensure_geodata(&Client::new(), false).await.unwrap(),
+            StageStatus::Skipped(_)
+        ));
+        assert!(matches!(
+            mihoto.update_geodata(&Client::new()).await.unwrap(),
+            StageStatus::Installed
+        ));
+
+        config.mihomo_config.geodata_mode = Some(false);
+        let mihoto = Mihoto::from_config(config);
+        assert!(matches!(
+            mihoto.ensure_geodata(&Client::new(), true).await.unwrap(),
+            StageStatus::Installed
+        ));
+        assert_eq!(
+            fs::read(dir.path().join("country.mmdb")).unwrap(),
+            b"/country.mmdb"
+        );
+
+        let mut missing = Config {
+            mihomo_config_root: dir.path().display().to_string(),
+            ..Config::default()
+        };
+        missing.mihomo_config.geodata_mode = Some(true);
+        missing.mihomo_config.geox_url = Some(GeoxUrl::default());
+        let mihoto = Mihoto::from_config(missing);
+        assert!(mihoto.ensure_geodata(&Client::new(), true).await.is_err());
+        assert!(mihoto.update_geodata(&Client::new()).await.is_err());
+
+        let mihoto = Mihoto::from_config(Config {
+            mihomo_config_root: dir.path().display().to_string(),
+            ..Config::default()
+        });
+        assert!(matches!(
+            mihoto.ensure_geodata(&Client::new(), false).await.unwrap(),
+            StageStatus::Skipped(_)
+        ));
+        assert!(matches!(
+            mihoto.update_geodata(&Client::new()).await.unwrap(),
+            StageStatus::Skipped(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn ui_manager_covers_install_skip_update_disabled_and_bad_archive_paths() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/dashboard.tar.gz"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(dashboard_archive()))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ui_url = format!("{}/dashboard.tar.gz", server.uri());
+        let mut config = Config {
+            mihomo_config_root: dir.path().display().to_string(),
+            ui: Some(Ui::Custom(ui_url)),
+            ..Config::default()
+        };
+        config.mihomo_config.external_ui = Some("ui".into());
+        let mihoto = Mihoto::from_config(config.clone());
+
+        assert!(matches!(
+            mihoto.ensure_ui(&Client::new(), false).await.unwrap(),
+            StageStatus::Installed
+        ));
+        assert_eq!(
+            fs::read_to_string(dir.path().join("ui/index.html")).unwrap(),
+            "<!doctype html><title>mihoto dashboard</title>"
+        );
+        assert!(matches!(
+            mihoto.ensure_ui(&Client::new(), false).await.unwrap(),
+            StageStatus::Skipped(_)
+        ));
+        assert!(matches!(
+            mihoto.update_ui(&Client::new()).await.unwrap(),
+            StageStatus::Installed
+        ));
+
+        config.ui = None;
+        let disabled = Mihoto::from_config(config);
+        assert!(matches!(
+            disabled.ensure_ui(&Client::new(), false).await.unwrap(),
+            StageStatus::Skipped(_)
+        ));
+        assert!(matches!(
+            disabled.update_ui(&Client::new()).await.unwrap(),
+            StageStatus::Skipped(_)
+        ));
+
+        let bad_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bad.tar.gz"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"not-a-tar".to_vec()))
+            .mount(&bad_server)
+            .await;
+        let bad_dir = tempfile::tempdir().unwrap();
+        let bad_config = Config {
+            mihomo_config_root: bad_dir.path().display().to_string(),
+            ui: Some(Ui::Custom(format!("{}/bad.tar.gz", bad_server.uri()))),
+            ..Config::default()
+        };
+        let bad = Mihoto::from_config(bad_config);
+        assert!(bad.ensure_ui(&Client::new(), false).await.is_err());
+        assert!(!bad_dir.path().join("ui").exists());
     }
 
     #[tokio::test]
@@ -1229,6 +1447,59 @@ mod tests {
             ..Config::default()
         };
         config.mihomo_config.mixed_port = Some(17890);
+        let mihoto = Mihoto::from_config(config);
+
+        assert!(mihoto.apply_existing_config_atomically().is_err());
+        assert_eq!(fs::read_to_string(config_path).unwrap(), original);
+    }
+
+    #[test]
+    fn local_tun_overlay_is_applied_atomically_while_remote_dynamic_fields_survive() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = "tun:\n  enable: false\n  stack: system\n  remote-only: keep\ndns:\n  enable: true\nproxies:\n  - name: subscription-node\nproxy-groups:\n  - name: Auto\nrules:\n  - MATCH,DIRECT\n";
+        let config_path = dir.path().join("config.yaml");
+        fs::write(&config_path, original).unwrap();
+        let mihomo_binary = fake_mihomo(dir.path(), 0);
+        let mut config = Config {
+            mihomo_binary_path: mihomo_binary.display().to_string(),
+            mihomo_config_root: dir.path().display().to_string(),
+            ..Config::default()
+        };
+        config.mihomo_config.tun = Some(crate::mihomo_config::TunConfig {
+            enable: Some(true),
+            auto_route: Some(true),
+            dns_hijack: Some(vec!["any:53".into()]),
+            ..Default::default()
+        });
+        let mihoto = Mihoto::from_config(config);
+
+        assert!(mihoto.apply_existing_config_atomically().unwrap());
+        let merged: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(merged["tun"]["enable"], true);
+        assert_eq!(merged["tun"]["auto-route"], true);
+        assert_eq!(merged["tun"]["stack"], "system");
+        assert_eq!(merged["tun"]["remote-only"], "keep");
+        assert_eq!(merged["dns"]["enable"], true);
+        assert_eq!(merged["proxies"][0]["name"], "subscription-node");
+        assert_eq!(merged["proxy-groups"][0]["name"], "Auto");
+        assert_eq!(merged["rules"][0], "MATCH,DIRECT");
+
+        assert!(!mihoto.apply_existing_config_atomically().unwrap());
+    }
+
+    #[test]
+    fn rejected_local_dynamic_extra_does_not_modify_existing_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = "tun:\n  enable: false\nrules:\n  - MATCH,DIRECT\n";
+        let config_path = dir.path().join("config.yaml");
+        fs::write(&config_path, original).unwrap();
+        let mut config = Config {
+            mihomo_config_root: dir.path().display().to_string(),
+            ..Config::default()
+        };
+        config.mihomo_config.extra =
+            toml::map::Map::from_iter([("rules".into(), toml::Value::Array(Vec::new()))]);
         let mihoto = Mihoto::from_config(config);
 
         assert!(mihoto.apply_existing_config_atomically().is_err());

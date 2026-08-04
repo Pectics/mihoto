@@ -1,6 +1,7 @@
 mod cmd;
 mod config;
 mod init;
+mod mihomo_config;
 mod mihoto;
 mod resolve_mihomo_bin;
 mod systemctl;
@@ -439,6 +440,28 @@ async fn cli() -> Result<()> {
 #[cfg(test)]
 mod command_policy_tests {
     use super::*;
+    use anyhow::anyhow;
+
+    #[tokio::test]
+    async fn stage_report_handles_success_skip_and_failure() {
+        let mut report = StageReport::new();
+        report.begin("fixture", Some("testing stage output"));
+        report.record("installed", StageStatus::Installed);
+        report.record("skipped", StageStatus::Skipped("already done".into()));
+        report
+            .run("successful", None, || async { Ok(StageStatus::Installed) })
+            .await;
+        report
+            .run("failed", None, || async { Err(anyhow!("fixture failure")) })
+            .await;
+
+        assert!(report.has_failures());
+        assert!(report.has_installed("installed"));
+        assert!(report.has_installed("successful"));
+        assert!(!report.has_installed("missing"));
+        report.print("test summary");
+    }
+
     #[test]
     fn root_policy_is_explicit() {
         assert!(command_requires_root(&Commands::Init {

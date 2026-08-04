@@ -69,18 +69,53 @@ sudo mihoto upgrade
 ```
 
 `mihomo.service` runs as root with `CAP_NET_ADMIN` and `CAP_NET_RAW`, which
-makes TUN a supported core use case. The controller defaults to
-`127.0.0.1:9090`; exposing it beyond loopback must be an explicit configuration
-choice protected by a secret.
+makes TUN a supported core use case. The controller address comes from the
+remote profile unless it is explicitly overridden in `mihoto.toml`; exposing it
+beyond loopback must be an explicit configuration choice protected by a secret.
 
 ## Configuration, recovery, and removal
 
-`init` downloads the subscription YAML, preserves unmanaged YAML fields such as
-`tun`, `dns`, proxies, groups, and rules, then applies Mihoto's local TOML
-overrides. Profiles exported by GUI clients may omit DNS and TUN settings that
-the GUI injects at runtime; such profiles are not standalone Mihomo configs.
-For full-host TUN, provide an explicit working `dns` section and the required
-TUN DNS hijack settings in the subscription YAML.
+`init` downloads the subscription YAML, preserves fields that are not locally
+set, and applies Mihoto's sparse TOML overrides. Omitted local fields leave the
+remote value untouched; objects merge recursively, while explicitly provided
+arrays replace the remote array (including an empty array). The dynamic
+collections `proxies`, `proxy-groups`, `rules`, `proxy-providers`,
+`rule-providers`, `sub-rules`, and `tunnels` remain subscription-owned.
+
+Common local configuration uses Rust-style `snake_case` and is rendered to
+Mihomo's kebab-case YAML keys:
+
+```toml
+[mihomo_config.tun]
+enable = true
+stack = "mixed"
+auto_route = true
+dns_hijack = ["any:53"]
+
+[mihomo_config.dns]
+enable = true
+enhanced_mode = "fake-ip"
+nameserver = ["1.1.1.1"]
+```
+
+Stable non-dynamic fields are strongly typed. Fields not yet modeled can use
+the controlled native-key escape hatch, for example
+`[mihomo_config.extra]` with a quoted `external-controller-cors` key. Dynamic
+keys, duplicate typed keys, unknown TOML fields outside `extra`, and `null` or
+environment-variable expansion are not supported. See the [Mihomo support
+matrix](docs/mihomo-config-support.md) for the complete boundary.
+
+Mihoto's `ui` setting controls dashboard asset management, while
+`mihomo_config.external_ui` controls Mihomo's final `external-ui` path.
+When the local path is omitted, Mihoto follows the rendered remote
+`external-ui` path for asset placement and otherwise uses `/etc/mihomo/ui`
+without injecting an `external-ui` override.
+Likewise, `geox_url` and the Geo update fields continue to control Mihoto's
+Geo-data downloads; Mihomo-native `external-ui-url` only changes the rendered
+Mihomo configuration. Profiles exported by GUI clients may omit DNS and TUN
+settings that the GUI injects at runtime; such profiles are not standalone
+Mihomo configs. For full-host TUN, provide an explicit working `dns` section
+and the required TUN DNS hijack settings.
 
 Mihoto validates staged configuration with the installed Mihomo core before
 replacement. After replacement it verifies that the service remains active
