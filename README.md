@@ -1,7 +1,7 @@
 # Mihoto
 
 Mihoto is a system-level CLI for installing and operating Mihomo on Linux with
-systemd. The current stable product contract is `1.0.0`.
+systemd. The current stable product contract is `1.0.1`.
 
 The supported public contract is in [docs/v1-contract.md](docs/v1-contract.md).
 It is part of the test suite rather than a best-effort guide.
@@ -34,7 +34,7 @@ Install a particular stable release or RC with `--version <semver>`:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Pectics/mihoto/main/install.sh \
-  | sudo sh -s -- --version v1.0.0
+  | sudo sh -s -- --version v1.0.1
 ```
 
 `--mirror` may proxy the archive download, but it never replaces GitHub release
@@ -140,7 +140,7 @@ attestation/provenance record. Verify a downloaded archive before installing:
 
 ```sh
 sha256sum --check SHA256SUMS
-gh attestation verify mihoto-v1.0.0-x86_64-unknown-linux-gnu.tar.gz \
+gh attestation verify mihoto-v1.0.1-x86_64-unknown-linux-gnu.tar.gz \
   --repo Pectics/mihoto
 ```
 

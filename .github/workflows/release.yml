@@ -207,14 +207,20 @@ jobs:
           ref: ${{ needs.validate.outputs.tag }}
       - name: Require the versioned audit decision
         env:
+          TAG: ${{ needs.validate.outputs.tag }}
           VERSION: ${{ needs.validate.outputs.version }}
         run: |
           set -eu
           audit="docs/audits/v${VERSION}.md"
-          test -f docs/audits/v1.0.0.md
           test -f "$audit"
-          grep -Fq '67c9f1b5739340fec9aa12c5bb7e1a1c5b9f519c' "$audit"
-          grep -Fq 'accepted the post-evidence RED/GREEN remediation' "$audit"
+          tested_commit="$(sed -n 's/^Tested candidate commit: `\([0-9a-f]\{40\}\)`$/\1/p' "$audit")"
+          test -n "$tested_commit"
+          git cat-file -e "${tested_commit}^{commit}"
+          git merge-base --is-ancestor "$tested_commit" "$GITHUB_SHA"
+          grep -Fq "Release tag: \`$TAG\`" "$audit"
+          grep -Fq "Package version: \`$VERSION\`" "$audit"
+          grep -Fq 'Real-host acceptance: PASS' "$audit"
+          grep -Fq 'Release decision: Accepted' "$audit"
           grep -Fq 'Required from the tag workflow' "$audit"
 
   release:

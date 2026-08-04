@@ -4,14 +4,16 @@ set -eu
 cd "$(dirname "$0")/.."
 
 contract=docs/v1-contract.md
-release_notes=docs/releases/v1.0.0.md
-audit_record=docs/audits/v1.0.0.md
+version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+test -n "$version"
+release_notes="docs/releases/v${version}.md"
+audit_record="docs/audits/v${version}.md"
 
 test -f "$contract"
 test -f "$release_notes"
 test -f "$audit_record"
-grep -Fq 'version = "1.0.0"' Cargo.toml
-grep -Fq 'version = "1.0.0"' Cargo.lock
+grep -Fq "version = \"$version\"" Cargo.toml
+grep -Fq "version = \"$version\"" Cargo.lock
 
 for required in \
 	'/etc/mihoto.toml' \

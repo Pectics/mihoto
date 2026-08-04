@@ -5,12 +5,16 @@ cd "$(dirname "$0")/.."
 
 workflow=.github/workflows/release.yml
 real_host_workflow=.github/workflows/real-host.yml
+version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+test -n "$version"
+audit_record="docs/audits/v${version}.md"
 
 test -f "$workflow"
 test -f "$real_host_workflow"
 grep -Fq 'v*.*.*' "$workflow"
 grep -Fq 'v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?' "$workflow"
-grep -Fq 'version = "1.0.0"' Cargo.toml
+grep -Fq "version = \"$version\"" Cargo.toml
+grep -Fq "version = \"$version\"" Cargo.lock
 
 for target in \
 	'x86_64-unknown-linux-gnu' \
@@ -33,15 +37,18 @@ for required in \
 	'attest-build-provenance' \
 	'libgcc-s1-arm64-cross' \
 	'audit-acceptance' \
-	'docs/audits/v1.0.0.md' \
 	'needs: [validate, quality, assemble, attest, audit-acceptance]' \
 	"github.event_name == 'push'" \
 	'github.event.inputs.tag' \
 	'--repo "$REPOSITORY"' \
 	'--prerelease' \
-	'--latest'; do
+	'--latest' \
+	'git merge-base --is-ancestor' \
+	'Real-host acceptance: PASS' \
+	'Release decision: Accepted'; do
 	grep -Fq -- "$required" "$workflow"
 done
+grep -Fq -- "$audit_record" "$workflow"
 
 if grep -Fq 'runs-on: [self-hosted' "$workflow"; then
 	echo 'release publication must not wait forever on unregistered runners' >&2
