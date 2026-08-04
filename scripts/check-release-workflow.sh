@@ -11,6 +11,7 @@ audit_record="docs/audits/v${version}.md"
 
 test -f "$workflow"
 test -f "$real_host_workflow"
+test -f "$audit_record"
 grep -Fq 'v*.*.*' "$workflow"
 grep -Fq 'v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?' "$workflow"
 grep -Fq "version = \"$version\"" Cargo.toml
@@ -48,7 +49,7 @@ for required in \
 	'Release decision: Accepted'; do
 	grep -Fq -- "$required" "$workflow"
 done
-grep -Fq -- "$audit_record" "$workflow"
+grep -Fq -- 'audit="docs/audits/v${VERSION}.md"' "$workflow"
 
 if grep -Fq 'runs-on: [self-hosted' "$workflow"; then
 	echo 'release publication must not wait forever on unregistered runners' >&2
