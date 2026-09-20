@@ -1,16 +1,9 @@
-use std::{
-    borrow::Cow,
-    cmp::min,
-    fs::{self, File},
-    io::{self, BufWriter, Read, Seek, SeekFrom, Write},
-    path::Path,
-    time::Duration,
-};
+use crate::infrastructure::filesystem::create_parent_dir;
+
+use std::{borrow::Cow, cmp::min, fs::File, io::Write, path::Path, time::Duration};
 
 use anyhow::{Context, Result};
-use base64::{prelude::BASE64_STANDARD, Engine};
 use colored::Colorize;
-use flate2::read::GzDecoder;
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Client;
@@ -25,21 +18,6 @@ pub const MAX_RETRIES: usize = 3;
 pub const DETAIL_PREFIX: &str = "   ";
 pub const MIHOTO_GITHUB_MIRROR_ENV: &str = "MIHOTO_GITHUB_MIRROR";
 
-pub fn systemd_escape_exec_arg(value: &str) -> String {
-    if value
-        .chars()
-        .all(|character| character.is_ascii_alphanumeric() || "/._:-".contains(character))
-    {
-        return value.to_string();
-    }
-    let escaped = value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('$', "$$")
-        .replace('%', "%%");
-    format!("\"{escaped}\"")
-}
-
 /// Shared retry strategy for HTTP operations.
 ///
 /// Yields up to [`MAX_RETRIES`] retries (so up to `MAX_RETRIES + 1` total attempts) with
@@ -53,22 +31,6 @@ pub fn retry_strategy() -> impl Iterator<Item = Duration> {
         .max_delay(Duration::from_secs(5))
         .map(jitter)
         .take(MAX_RETRIES)
-}
-
-/// Creates the parent directory for a given path if it does not exist.
-///
-/// # Arguments
-///
-/// * `path` - A string slice that holds the path for which the parent directory should be created.
-pub fn create_parent_dir(path: &Path) -> Result<()> {
-    // let parent_dir = Path::new(path)
-    let parent_dir = path
-        .parent()
-        .with_context(|| format!("parent directory of `{}` invalid", path.to_string_lossy()))?;
-    if !parent_dir.exists() {
-        fs::create_dir_all(parent_dir)?;
-    }
-    Ok(())
 }
 
 fn github_mirror_base() -> Option<String> {
@@ -244,73 +206,10 @@ async fn download_file_once(
     result
 }
 
-pub fn delete_file(path: &str, prefix: impl std::fmt::Display) -> Result<()> {
-    // Delete file if exists
-    if Path::new(path).exists() {
-        fs::remove_file(path).map(|_| {
-            println!("{} Removed {}", prefix, path.underline().yellow());
-        })?;
-    }
-    Ok(())
-}
-
-pub fn extract_gzip(from_path: &Path, to_path: &str, prefix: impl std::fmt::Display) -> Result<()> {
-    // Create parent directory for extraction dest if not exists
-    create_parent_dir(Path::new(to_path))?;
-
-    // Extract gzip file
-    let mut archive = GzDecoder::new(File::open(from_path)?);
-    let mut file = File::create(to_path)?;
-    io::copy(&mut archive, &mut file)?;
-    // fs::remove_file(gzip_path)?;
-    println!("{} Extracted to {}", prefix, to_path.underline().yellow());
-    Ok(())
-}
-
-/// Try and decode a base64 encoded file in place.
-///
-/// Decodes the base64 encoded content of a file in place and writes the decoded content back to the
-/// file. If the file does not contain base64 encoded content, maintains the file as is.
-///
-/// # Arguments
-///
-/// * `filepath` - Path to the file to decode base64 content in place.
-pub fn try_decode_base64_file_inplace(filepath: &str) -> Result<()> {
-    // Open the file for reading and writing
-    let mut file = File::options().read(true).write(true).open(filepath)?;
-    let mut base64_buf = Vec::new();
-
-    // Read the file content into the buffer
-    file.read_to_end(&mut base64_buf)?;
-
-    // Try to decode the base64 content
-    match BASE64_STANDARD.decode(&base64_buf) {
-        Ok(decoded_bytes) => {
-            // Truncate the file and seek to the beginning
-            file.set_len(0)?;
-            file.seek(SeekFrom::Start(0))?;
-
-            // Write the decoded bytes back to the file
-            let mut writer = BufWriter::new(&file);
-            writer.write_all(&decoded_bytes)?;
-        }
-        Err(_) => {
-            // If decoding fails, do nothing and return Ok
-            return Ok(());
-        }
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        fs,
-        sync::{Mutex, OnceLock},
-    };
-    use tempfile::tempdir;
+    use std::sync::{Mutex, OnceLock};
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -318,145 +217,21 @@ mod tests {
     }
 
     #[test]
-    fn test_create_parent_dir_creates_directories() -> Result<()> {
-        let dir = tempdir()?;
-        let nested_path = dir.path().join("nested/dir/file.txt");
-
-        create_parent_dir(&nested_path)?;
-
-        let parent = nested_path.parent().unwrap();
-        assert!(parent.exists());
-        Ok(())
-    }
-
-    #[test]
-    fn test_delete_file_removes_existing_file() -> Result<()> {
-        let dir = tempdir()?;
-        let file_path = dir.path().join("test.txt");
-        fs::write(&file_path, "test content")?;
-
-        delete_file(file_path.to_str().unwrap(), "prefix")?;
-
-        assert!(!file_path.exists());
-        Ok(())
-    }
-
-    #[test]
-    fn test_delete_file_handles_nonexistent_file() -> Result<()> {
-        let dir = tempdir()?;
-        let file_path = dir.path().join("nonexistent.txt");
-
-        // Should not error on non-existent file
-        delete_file(file_path.to_str().unwrap(), "prefix")?;
-        assert!(!file_path.exists());
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_extract_gzip() -> Result<()> {
-        let dir = tempdir()?;
-        let gzip_path = dir.path().join("test.gz");
-        let output_path = dir.path().join("output.txt");
-
-        // Create a simple gzip file
-        use flate2::write::GzEncoder;
-        use flate2::Compression;
-        use std::io::Write;
-
-        let gzip_file = fs::File::create(&gzip_path)?;
-        let mut encoder = GzEncoder::new(gzip_file, Compression::default());
-        encoder.write_all(b"test content")?;
-        encoder.finish()?;
-
-        extract_gzip(&gzip_path, output_path.to_str().unwrap(), "prefix")?;
-
-        let content = fs::read_to_string(&output_path)?;
-        assert_eq!(content, "test content");
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_try_decode_base64_file_inplace_valid_base64() -> Result<()> {
-        let dir = tempdir()?;
-        let file_path = dir.path().join("test.txt");
-
-        let encoded = base64::engine::general_purpose::STANDARD.encode("test content");
-        fs::write(&file_path, &encoded)?;
-
-        try_decode_base64_file_inplace(file_path.to_str().unwrap())?;
-
-        let decoded = fs::read_to_string(&file_path)?;
-        assert_eq!(decoded, "test content");
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_try_decode_base64_file_inplace_invalid_base64() -> Result<()> {
-        let dir = tempdir()?;
-        let file_path = dir.path().join("test.txt");
-
-        fs::write(&file_path, "not valid base64!!!")?;
-
-        // Should not error on invalid base64
-        try_decode_base64_file_inplace(file_path.to_str().unwrap())?;
-
-        // File should remain unchanged
-        let content = fs::read_to_string(&file_path)?;
-        assert_eq!(content, "not valid base64!!!");
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_resolve_download_url_uses_mirror_for_github_downloads() {
+    fn mirror_applies_only_to_github_download_hosts() {
         let _guard = env_lock().lock().unwrap();
         std::env::set_var(MIHOTO_GITHUB_MIRROR_ENV, "https://gh-proxy.org/");
-
-        let resolved = resolve_download_url(
-            "https://github.com/MetaCubeX/mihomo/releases/latest/download/version.txt",
+        assert_eq!(
+            resolve_download_url("https://github.com/example/file.tar.gz").as_ref(),
+            "https://gh-proxy.org/https://github.com/example/file.tar.gz"
         );
         assert_eq!(
-            resolved.as_ref(),
-            "https://gh-proxy.org/https://github.com/MetaCubeX/mihomo/releases/latest/download/version.txt"
+            resolve_download_url("https://api.github.com/repos/example/releases").as_ref(),
+            "https://api.github.com/repos/example/releases"
         );
-
-        std::env::remove_var(MIHOTO_GITHUB_MIRROR_ENV);
-    }
-
-    #[test]
-    fn test_resolve_download_url_keeps_non_github_urls_and_api_urls() {
-        let _guard = env_lock().lock().unwrap();
-        std::env::set_var(MIHOTO_GITHUB_MIRROR_ENV, "https://gh-proxy.org");
-
         assert_eq!(
             resolve_download_url("https://example.com/file.tar.gz").as_ref(),
             "https://example.com/file.tar.gz"
         );
-        assert_eq!(
-            resolve_download_url("https://api.github.com/repos/spencerwooo/mihoto/releases/latest")
-                .as_ref(),
-            "https://api.github.com/repos/spencerwooo/mihoto/releases/latest"
-        );
-
         std::env::remove_var(MIHOTO_GITHUB_MIRROR_ENV);
-    }
-
-    #[test]
-    fn test_systemd_escape_exec_arg() {
-        assert_eq!(
-            systemd_escape_exec_arg("/usr/local/bin/mihomo"),
-            "/usr/local/bin/mihomo"
-        );
-        assert_eq!(
-            systemd_escape_exec_arg("/opt/mihomo core"),
-            "\"/opt/mihomo core\""
-        );
-        assert_eq!(
-            systemd_escape_exec_arg("/opt/$mihomo%core"),
-            "\"/opt/$$mihomo%%core\""
-        );
     }
 }

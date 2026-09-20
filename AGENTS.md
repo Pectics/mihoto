@@ -58,18 +58,17 @@ scripts/check-system-scope.sh
 
 ```
 src/
-├── main.rs       # CLI entry point, Clap parsing, command dispatch
-├── init.rs       # `mihoto init` flow: bootstrap config, prompt for subscription URL, stage reporting
-├── mihoto.rs     # Core Mihoto struct with init/update/apply/uninstall helpers
-├── config.rs     # Config (TOML) and MihomoConfig parsing with serde defaults
-├── ui.rs         # Dashboard source selection and UI asset installation
-├── resolve_mihomo_bin.rs # Resolve/download mihomo release artifacts for supported architectures
-├── utils.rs      # File I/O, download, gzip extraction, base64 decoding
-├── systemctl.rs  # Fluent wrapper around systemctl commands
-├── cmd.rs        # Clap derive enums for CLI structure
-├── upgrade.rs    # Self-upgrade functionality using self_update crate
-└── timer.rs      # Systemd auto-update timer management
+├── main.rs           # Tokio entry point and top-level error handling only
+├── cli/              # Clap arguments, command dispatch, prompts, and terminal rendering
+├── application/      # Init/update/apply/service/timer/uninstall/upgrade workflows
+│   └── ports/        # Interfaces implemented by infrastructure adapters
+├── domain/           # Config/UI models and pure validation/merge rules
+└── infrastructure/   # HTTP, files, processes, systemd, assets, and self-upgrade
 ```
+
+Dependencies point inward: CLI invokes application workflows; application depends on domain and
+its own ports; infrastructure implements those ports. Domain code must not access files, network,
+processes, or terminal output.
 
 ### Key pieces
 
@@ -90,9 +89,10 @@ src/
    - `--yes` is for non-interactive use and expects required fields to already be present
    - Stage reports make repeat runs safe and easier to follow
 
-4. **Mihoto**: main struct holding config and derived paths
+4. **Mihoto infrastructure facade**: holds config and derived managed paths
    - All methods return `anyhow::Result<T>` for consistent error handling
    - Uses Tokio async for downloads
+   - Lives under `infrastructure/mihomo/`; application workflows reach it through ports
 
 5. **Self-upgrade**: updates from GitHub releases
    - `upgrade::run_upgrade()`: Downloads and replaces the current binary
