@@ -124,3 +124,134 @@ fn replace_dir(source_dir: &Path, target_dir: &Path) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flate2::{write::GzEncoder, Compression};
+    use tar::{Builder, Header};
+    use wiremock::{
+        matchers::{header, method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+
+    fn archive_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let encoder = GzEncoder::new(Vec::new(), Compression::default());
+        let mut archive = Builder::new(encoder);
+        for (path, contents) in entries {
+            let mut header = Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            archive.append_data(&mut header, path, *contents).unwrap();
+        }
+        archive.into_inner().unwrap().finish().unwrap()
+    }
+
+    #[test]
+    fn extraction_accepts_valid_archives_and_rejects_invalid_gzip() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("ui.tar.gz");
+        let output = dir.path().join("output");
+        fs::write(
+            &archive,
+            archive_bytes(&[("dashboard/index.html", b"dashboard")]),
+        )
+        .unwrap();
+        fs::create_dir(&output).unwrap();
+        extract_tar_gz(&archive, &output).unwrap();
+        assert_eq!(
+            fs::read_to_string(output.join("dashboard/index.html")).unwrap(),
+            "dashboard"
+        );
+
+        fs::write(&archive, b"not gzip").unwrap();
+        assert!(extract_tar_gz(&archive, &output).is_err());
+    }
+
+    #[test]
+    fn archive_root_requires_exactly_one_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(find_archive_root(dir.path()).is_err());
+
+        fs::write(dir.path().join("root-file"), "content").unwrap();
+        assert!(find_archive_root(dir.path())
+            .unwrap_err()
+            .to_string()
+            .contains("root to be a directory"));
+
+        fs::remove_file(dir.path().join("root-file")).unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir(&root).unwrap();
+        assert_eq!(find_archive_root(dir.path()).unwrap(), root);
+
+        fs::create_dir(dir.path().join("second")).unwrap();
+        assert!(find_archive_root(dir.path())
+            .unwrap_err()
+            .to_string()
+            .contains("found 2"));
+    }
+
+    #[test]
+    fn replacement_handles_new_and_existing_targets_and_cleans_stale_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("ui");
+        let source = dir.path().join("source-one");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("version"), "one").unwrap();
+        replace_dir(&source, &target).unwrap();
+        assert_eq!(fs::read_to_string(target.join("version")).unwrap(), "one");
+        assert!(!source.exists());
+
+        let stale_stage = dir.path().join(".ui.tmp");
+        let stale_backup = dir.path().join(".ui.bak");
+        fs::create_dir(&stale_stage).unwrap();
+        fs::create_dir(&stale_backup).unwrap();
+        fs::write(stale_stage.join("stale"), "stale").unwrap();
+        fs::write(stale_backup.join("stale"), "stale").unwrap();
+        let source = dir.path().join("source-two");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("version"), "two").unwrap();
+        replace_dir(&source, &target).unwrap();
+        assert_eq!(fs::read_to_string(target.join("version")).unwrap(), "two");
+        assert!(!stale_stage.exists());
+        assert!(!stale_backup.exists());
+
+        assert!(replace_dir(dir.path(), Path::new("/")).is_err());
+    }
+
+    #[tokio::test]
+    async fn install_downloads_extracts_and_atomically_replaces_dashboard() {
+        let server = MockServer::start().await;
+        let body = archive_bytes(&[
+            ("dashboard/index.html", b"new dashboard"),
+            ("dashboard/assets/app.js", b"app"),
+        ]);
+        Mock::given(method("GET"))
+            .and(path("/ui.tar.gz"))
+            .and(header("user-agent", "mihoto-test"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("nested/ui");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("old"), "old dashboard").unwrap();
+        let ui = Ui::Custom(format!("{}/ui.tar.gz", server.uri()));
+        install_ui(&Client::new(), &ui, &target, "mihoto-test", "test")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(target.join("index.html")).unwrap(),
+            "new dashboard"
+        );
+        assert_eq!(
+            fs::read_to_string(target.join("assets/app.js")).unwrap(),
+            "app"
+        );
+        assert!(!target.join("old").exists());
+    }
+}

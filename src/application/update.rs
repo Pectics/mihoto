@@ -115,16 +115,24 @@ mod tests {
     use std::{
         cell::RefCell,
         future::{ready, Future},
+        rc::Rc,
     };
 
-    #[derive(Default)]
     struct FakeOperations {
-        calls: RefCell<Vec<&'static str>>,
+        calls: RefCell<Vec<String>>,
+        fail_on: Option<&'static str>,
+        skip_core: bool,
     }
 
     impl FakeOperations {
         fn call(&self, name: &'static str) -> Result<StageStatus> {
-            self.calls.borrow_mut().push(name);
+            self.calls.borrow_mut().push(name.to_string());
+            if self.fail_on == Some(name) {
+                anyhow::bail!("{name} failed");
+            }
+            if name == "core" && self.skip_core {
+                return Ok(StageStatus::Skipped("already current".to_string()));
+            }
             Ok(StageStatus::Installed)
         }
     }
@@ -142,7 +150,8 @@ mod tests {
             ready(self.call("ui"))
         }
 
-        fn update_core(&self, _arch: Option<&str>) -> impl Future<Output = Result<StageStatus>> {
+        fn update_core(&self, arch: Option<&str>) -> impl Future<Output = Result<StageStatus>> {
+            self.calls.borrow_mut().push(format!("arch:{arch:?}"));
             ready(self.call("core"))
         }
 
@@ -152,53 +161,227 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct SilentEvents;
+    struct EventLog {
+        begins: Vec<&'static str>,
+        summaries: Vec<(String, Vec<String>)>,
+    }
 
-    impl StageEvents for SilentEvents {
-        fn begin(&mut self, _name: &'static str, _description: Option<&str>) {}
-        fn summary(&mut self, _label: &str, _entries: &[StageEntry]) {}
+    struct RecordingEvents(Rc<RefCell<EventLog>>);
+
+    impl StageEvents for RecordingEvents {
+        fn begin(&mut self, name: &'static str, _description: Option<&str>) {
+            self.0.borrow_mut().begins.push(name);
+        }
+
+        fn summary(&mut self, label: &str, entries: &[StageEntry]) {
+            self.0.borrow_mut().summaries.push((
+                label.to_string(),
+                entries
+                    .iter()
+                    .map(|entry| format!("{}:{:?}", entry.name, entry.status))
+                    .collect(),
+            ));
+        }
+    }
+
+    fn operations(fail_on: Option<&'static str>, skip_core: bool) -> FakeOperations {
+        FakeOperations {
+            calls: RefCell::new(Vec::new()),
+            fail_on,
+            skip_core,
+        }
+    }
+
+    fn options() -> UpdateOptions<'static> {
+        UpdateOptions {
+            config: false,
+            core: false,
+            geodata: false,
+            ui: false,
+            all: false,
+            arch: None,
+        }
+    }
+
+    fn events() -> (RecordingEvents, Rc<RefCell<EventLog>>) {
+        let log = Rc::new(RefCell::new(EventLog::default()));
+        (RecordingEvents(log.clone()), log)
     }
 
     #[tokio::test]
     async fn all_preserves_stage_and_restart_order() {
-        let operations = FakeOperations::default();
+        let operations = operations(None, false);
+        let (events, log) = events();
         run(
             &operations,
             UpdateOptions {
-                config: false,
-                core: false,
-                geodata: false,
-                ui: false,
                 all: true,
-                arch: None,
+                ..options()
             },
-            SilentEvents,
+            events,
         )
         .await
         .unwrap();
         assert_eq!(
             *operations.calls.borrow(),
-            ["config", "geodata", "ui", "core", "restart"]
+            ["config", "geodata", "ui", "arch:None", "core", "restart"]
+        );
+        assert_eq!(
+            log.borrow().begins,
+            ["config", "geodata", "ui", "core", "service restart"]
         );
     }
 
     #[tokio::test]
     async fn default_update_is_config_only() {
-        let operations = FakeOperations::default();
-        run(
+        let operations = operations(None, false);
+        let (events, log) = events();
+        run(&operations, options(), events).await.unwrap();
+        assert_eq!(*operations.calls.borrow(), ["config"]);
+        assert_eq!(
+            log.borrow().summaries[0].1,
+            [
+                "config:Installed",
+                "service restart:Skipped(\"completed transactionally with config update\")"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn all_continues_download_stages_after_failure_and_skips_restart() {
+        let operations = operations(Some("geodata"), false);
+        let (events, log) = events();
+        let result = run(
             &operations,
             UpdateOptions {
-                config: false,
-                core: false,
-                geodata: false,
-                ui: false,
-                all: false,
-                arch: None,
+                all: true,
+                ..options()
             },
-            SilentEvents,
+            events,
         )
-        .await
-        .unwrap();
-        assert_eq!(*operations.calls.borrow(), ["config"]);
+        .await;
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "one or more update stages failed - see summary above"
+        );
+        assert_eq!(
+            *operations.calls.borrow(),
+            ["config", "geodata", "ui", "arch:None", "core"]
+        );
+        assert_eq!(
+            log.borrow().summaries[0].1.last().unwrap(),
+            "service restart:Skipped(\"skipped due to earlier failures\")"
+        );
+    }
+
+    #[tokio::test]
+    async fn core_restart_depends_on_install_status_and_forwards_arch() {
+        for (fail_on, skip_core, expected_calls, expected_tail, succeeds) in [
+            (
+                None,
+                false,
+                vec!["arch:Some(\"arm64\")", "core", "restart"],
+                "service restart:Installed",
+                true,
+            ),
+            (
+                None,
+                true,
+                vec!["arch:Some(\"arm64\")", "core"],
+                "service restart:Skipped(\"core already up to date\")",
+                true,
+            ),
+            (
+                Some("core"),
+                false,
+                vec!["arch:Some(\"arm64\")", "core"],
+                "service restart:Skipped(\"skipped due to earlier failures\")",
+                false,
+            ),
+        ] {
+            let operations = operations(fail_on, skip_core);
+            let (events, log) = events();
+            let result = run(
+                &operations,
+                UpdateOptions {
+                    core: true,
+                    arch: Some("arm64"),
+                    ..options()
+                },
+                events,
+            )
+            .await;
+            assert_eq!(*operations.calls.borrow(), expected_calls);
+            assert_eq!(log.borrow().summaries[0].1.last().unwrap(), expected_tail);
+            assert_eq!(result.is_ok(), succeeds);
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_single_resource_flags_are_mutually_exclusive_by_priority() {
+        for (options, expected) in [
+            (
+                UpdateOptions {
+                    ui: true,
+                    geodata: true,
+                    config: true,
+                    ..options()
+                },
+                "ui",
+            ),
+            (
+                UpdateOptions {
+                    geodata: true,
+                    config: true,
+                    ..options()
+                },
+                "geodata",
+            ),
+            (
+                UpdateOptions {
+                    config: true,
+                    ..options()
+                },
+                "config",
+            ),
+        ] {
+            let operations = operations(None, false);
+            let (events, _) = events();
+            run(&operations, options, events).await.unwrap();
+            assert_eq!(*operations.calls.borrow(), [expected]);
+        }
+    }
+
+    #[tokio::test]
+    async fn config_failure_is_reported_and_restart_is_skipped() {
+        let operations = operations(Some("config"), false);
+        let (events, log) = events();
+        assert!(run(&operations, options(), events).await.is_err());
+        assert_eq!(
+            log.borrow().summaries[0].1.last().unwrap(),
+            "service restart:Skipped(\"skipped due to earlier failures\")"
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_failure_turns_successful_core_or_all_updates_into_errors() {
+        for options in [
+            UpdateOptions {
+                core: true,
+                ..options()
+            },
+            UpdateOptions {
+                all: true,
+                ..options()
+            },
+        ] {
+            let operations = operations(Some("restart"), false);
+            let (events, log) = events();
+            assert!(run(&operations, options, events).await.is_err());
+            assert_eq!(
+                log.borrow().summaries[0].1.last().unwrap(),
+                "service restart:Failed(restart failed)"
+            );
+        }
     }
 }

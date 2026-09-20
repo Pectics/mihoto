@@ -142,3 +142,158 @@ impl Mihoto {
         Ok(StageStatus::Installed)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::config::{Config, GeoxUrl};
+    use std::fs;
+    use wiremock::{
+        matchers::{method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+
+    fn mihoto_with_root(root: &Path) -> Mihoto {
+        let config = Config {
+            mihomo_config_root: root.to_string_lossy().into_owned(),
+            ..Config::default()
+        };
+        Mihoto::from_config(config)
+    }
+
+    #[tokio::test]
+    async fn missing_configuration_and_existing_ui_use_documented_skip_reasons() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = Client::new();
+        let mut mihoto = mihoto_with_root(dir.path());
+        mihoto.config.mihomo_config.geox_url = None;
+        assert!(matches!(
+            mihoto.ensure_geodata(&client, false).await.unwrap(),
+            StageStatus::Skipped(reason) if reason == "geox_url not configured"
+        ));
+        assert!(matches!(
+            mihoto.update_geodata(&client).await.unwrap(),
+            StageStatus::Skipped(reason) if reason == "`geox_url` undefined"
+        ));
+
+        mihoto.config.ui = None;
+        assert!(matches!(
+            mihoto.ensure_ui(&client, false).await.unwrap(),
+            StageStatus::Skipped(reason) if reason == "UI management disabled"
+        ));
+        assert!(matches!(
+            mihoto.update_ui(&client).await.unwrap(),
+            StageStatus::Skipped(reason) if reason == "UI management disabled"
+        ));
+
+        mihoto.config.ui = Some(crate::domain::ui::Ui::Metacubexd);
+        mihoto.config.mihomo_config.external_ui = None;
+        assert!(matches!(
+            mihoto.ensure_ui(&client, false).await.unwrap(),
+            StageStatus::Skipped(reason) if reason == "`external_ui` path unset"
+        ));
+        assert!(matches!(
+            mihoto.update_ui(&client).await.unwrap(),
+            StageStatus::Skipped(reason) if reason == "`external_ui` undefined"
+        ));
+
+        mihoto.config.mihomo_config.external_ui = Some("dashboard".to_string());
+        fs::create_dir_all(dir.path().join("dashboard")).unwrap();
+        fs::write(dir.path().join("dashboard/index.html"), "installed").unwrap();
+        assert!(matches!(
+            mihoto.ensure_ui(&client, false).await.unwrap(),
+            StageStatus::Skipped(reason) if reason == "metacubexd already installed"
+        ));
+    }
+
+    #[tokio::test]
+    async fn dat_mode_downloads_only_missing_files_unless_forced() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/geoip.dat"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"geoip"))
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/geosite.dat"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"geosite"))
+            .expect(3)
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("geoip.dat"), "existing").unwrap();
+        let mut mihoto = mihoto_with_root(dir.path());
+        mihoto.config.mihomo_config.geodata_mode = Some(true);
+        mihoto.config.mihomo_config.geox_url = Some(GeoxUrl {
+            geoip: format!("{}/geoip.dat", server.uri()),
+            geosite: format!("{}/geosite.dat", server.uri()),
+            mmdb: format!("{}/country.mmdb", server.uri()),
+        });
+        let client = Client::new();
+
+        assert!(matches!(
+            mihoto.ensure_geodata(&client, false).await.unwrap(),
+            StageStatus::Installed
+        ));
+        assert_eq!(
+            fs::read_to_string(dir.path().join("geoip.dat")).unwrap(),
+            "existing"
+        );
+        assert!(matches!(
+            mihoto.ensure_geodata(&client, false).await.unwrap(),
+            StageStatus::Skipped(reason) if reason == "geodata present"
+        ));
+        assert!(matches!(
+            mihoto.ensure_geodata(&client, true).await.unwrap(),
+            StageStatus::Installed
+        ));
+        assert!(matches!(
+            mihoto.update_geodata(&client).await.unwrap(),
+            StageStatus::Installed
+        ));
+        assert_eq!(
+            fs::read_to_string(dir.path().join("geoip.dat")).unwrap(),
+            "geoip"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("geosite.dat")).unwrap(),
+            "geosite"
+        );
+    }
+
+    #[tokio::test]
+    async fn mmdb_mode_skips_existing_file_and_update_forces_download() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/country.mmdb"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"new mmdb"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("country.mmdb"), "existing").unwrap();
+        let mut mihoto = mihoto_with_root(dir.path());
+        mihoto.config.mihomo_config.geodata_mode = Some(false);
+        mihoto.config.mihomo_config.geox_url = Some(GeoxUrl {
+            geoip: "unused".to_string(),
+            geosite: "unused".to_string(),
+            mmdb: format!("{}/country.mmdb", server.uri()),
+        });
+        let client = Client::new();
+
+        assert!(matches!(
+            mihoto.ensure_geodata(&client, false).await.unwrap(),
+            StageStatus::Skipped(reason) if reason == "geodata present"
+        ));
+        assert!(matches!(
+            mihoto.update_geodata(&client).await.unwrap(),
+            StageStatus::Installed
+        ));
+        assert_eq!(
+            fs::read_to_string(dir.path().join("country.mmdb")).unwrap(),
+            "new mmdb"
+        );
+    }
+}

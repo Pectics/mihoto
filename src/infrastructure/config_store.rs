@@ -108,4 +108,60 @@ mod tests {
         assert_eq!(value["tun"]["stack"], "system");
         assert_eq!(value["rules"][0], "MATCH,DIRECT");
     }
+
+    #[test]
+    fn load_and_default_creation_distinguish_missing_existing_and_invalid_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested/mihoto.toml");
+        let path_str = path.to_str().unwrap();
+
+        assert!(load_config(path_str).unwrap().is_none());
+        assert!(write_default_if_missing(path_str).unwrap());
+        let loaded = load_config(path_str).unwrap().unwrap();
+        assert_eq!(loaded.mihomo_binary_path, "/usr/local/bin/mihomo");
+
+        let original = fs::read_to_string(&path).unwrap();
+        assert!(!write_default_if_missing(path_str).unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+
+        fs::write(&path, "not valid = [").unwrap();
+        assert!(load_config(path_str).is_err());
+    }
+
+    #[test]
+    fn parse_validates_loaded_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mihoto.toml");
+        let mut config = Config::default();
+        write_config(&config, &path).unwrap();
+        assert_eq!(
+            parse_config(path.to_str().unwrap())
+                .unwrap_err()
+                .to_string(),
+            "`remote_config_url` undefined"
+        );
+
+        config.remote_config_url = "https://example.com/config.yaml".to_string();
+        write_config(&config, &path).unwrap();
+        let parsed = parse_config(path.to_str().unwrap()).unwrap();
+        assert_eq!(parsed.remote_config_url, config.remote_config_url);
+    }
+
+    #[test]
+    fn unchanged_and_malformed_yaml_are_never_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let defaults = MihomoConfig::default();
+        let current = merge_mihomo_override("rules: []\n", &defaults)
+            .unwrap()
+            .unwrap();
+        fs::write(&path, &current).unwrap();
+        assert!(!apply_mihomo_override(path.to_str().unwrap(), &defaults).unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap(), current);
+
+        let malformed = "port: [";
+        fs::write(&path, malformed).unwrap();
+        assert!(apply_mihomo_override(path.to_str().unwrap(), &defaults).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), malformed);
+    }
 }

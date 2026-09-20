@@ -269,6 +269,10 @@ pub async fn resolve_binary_url(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::{
+        matchers::{header, method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
 
     #[test]
     fn test_detect_arch_returns_valid_value() {
@@ -332,5 +336,86 @@ mod tests {
         let error = result.unwrap_err().to_string();
         assert!(error.contains("Did you mean"));
         assert!(error.contains("amd64"));
+    }
+
+    #[tokio::test]
+    async fn version_response_is_trimmed_and_validated() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/version.txt"))
+            .and(header("user-agent", "mihoto-test"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("  v1.2.3\n"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert_eq!(
+            fetch_latest_version_once(
+                &Client::new(),
+                &format!("{}/version.txt", server.uri()),
+                "mihoto-test"
+            )
+            .await
+            .unwrap(),
+            "v1.2.3"
+        );
+
+        Mock::given(method("GET"))
+            .and(path("/empty"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(" \n"))
+            .mount(&server)
+            .await;
+        assert!(fetch_latest_version_once(
+            &Client::new(),
+            &format!("{}/empty", server.uri()),
+            "mihoto-test"
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("empty version"));
+
+        Mock::given(method("GET"))
+            .and(path("/failure"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        assert!(fetch_latest_version_once(
+            &Client::new(),
+            &format!("{}/failure", server.uri()),
+            "mihoto-test"
+        )
+        .await
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn configured_binary_url_bypasses_architecture_and_version_lookup() {
+        let mut config = Config {
+            remote_mihomo_binary_url: Some("https://example.com/mihomo.gz".to_string()),
+            ..Config::default()
+        };
+        let resolved = resolve_binary(&Client::new(), &config, Some("invalid"), "test")
+            .await
+            .unwrap();
+        assert_eq!(
+            resolved,
+            ResolvedBinary {
+                url: "https://example.com/mihomo.gz".to_string(),
+                version: None,
+            }
+        );
+        assert_eq!(
+            resolve_binary_url(&Client::new(), &config, None, "test")
+                .await
+                .unwrap(),
+            "https://example.com/mihomo.gz"
+        );
+
+        config.remote_mihomo_binary_url = Some(String::new());
+        assert!(
+            resolve_binary(&Client::new(), &config, Some("invalid"), "test")
+                .await
+                .is_err()
+        );
     }
 }
