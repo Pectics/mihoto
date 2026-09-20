@@ -12,16 +12,14 @@ use tempfile::NamedTempFile;
 impl InitOperations for (&Mihoto, &Client) {
     type BinaryHandle = NamedTempFile;
 
-    fn prepare_binary(
+    async fn prepare_binary(
         &self,
         force: bool,
         arch: Option<&str>,
-    ) -> impl Future<Output = Result<BinaryPlan<Self::BinaryHandle>>> {
-        async move {
-            match self.0.prepare_binary(self.1, force, arch).await? {
-                RuntimeBinaryPlan::Skip(reason) => Ok(BinaryPlan::Skip(reason)),
-                RuntimeBinaryPlan::Install(handle) => Ok(BinaryPlan::Install(handle)),
-            }
+    ) -> Result<BinaryPlan<Self::BinaryHandle>> {
+        match self.0.prepare_binary(self.1, force, arch).await? {
+            RuntimeBinaryPlan::Skip(reason) => Ok(BinaryPlan::Skip(reason)),
+            RuntimeBinaryPlan::Install(handle) => Ok(BinaryPlan::Install(handle)),
         }
     }
 
