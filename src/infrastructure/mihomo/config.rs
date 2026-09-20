@@ -88,7 +88,123 @@ impl Mihoto {
             }
         }
     }
+}
 
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::*;
+    use crate::domain::config::Config;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn test_mihoto(dir: &Path) -> Mihoto {
+        let config = Config {
+            mihomo_config_root: dir.join("config").to_string_lossy().into_owned(),
+            mihomo_binary_path: dir.join("mihomo").to_string_lossy().into_owned(),
+            ..Config::default()
+        };
+        Mihoto::from_config(config)
+    }
+
+    fn write_executable(path: &Path, body: &str) {
+        fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn validation_uses_exact_arguments_and_prefers_stderr_details() {
+        let dir = tempfile::tempdir().unwrap();
+        let mihoto = test_mihoto(dir.path());
+        fs::create_dir_all(&mihoto.mihomo_target_config_root).unwrap();
+        fs::write(&mihoto.mihomo_target_config_path, "rules: []\n").unwrap();
+        let args_log = dir.path().join("args");
+        write_executable(
+            Path::new(&mihoto.mihomo_target_binary_path),
+            &format!("printf '%s\\n' \"$@\" > '{}'", args_log.display()),
+        );
+        assert!(matches!(
+            mihoto.validate_installed_config().unwrap(),
+            StageStatus::Installed
+        ));
+        assert_eq!(
+            fs::read_to_string(&args_log).unwrap(),
+            format!(
+                "-t\n-d\n{}\n-f\n{}\n",
+                mihoto.mihomo_target_config_root, mihoto.mihomo_target_config_path
+            )
+        );
+
+        write_executable(
+            Path::new(&mihoto.mihomo_target_binary_path),
+            "printf 'stdout detail'; printf 'stderr detail' >&2; exit 1",
+        );
+        assert_eq!(
+            mihoto.validate_installed_config().unwrap_err().to_string(),
+            "Mihomo rejected staged config: stderr detail"
+        );
+
+        write_executable(
+            Path::new(&mihoto.mihomo_target_binary_path),
+            "printf 'stdout detail'; exit 1",
+        );
+        assert_eq!(
+            mihoto.validate_installed_config().unwrap_err().to_string(),
+            "Mihomo rejected staged config: stdout detail"
+        );
+
+        write_executable(Path::new(&mihoto.mihomo_target_binary_path), "exit 1");
+        assert!(mihoto
+            .validate_installed_config()
+            .unwrap_err()
+            .to_string()
+            .contains("Mihomo rejected staged config with"));
+
+        fs::remove_file(&mihoto.mihomo_target_binary_path).unwrap();
+        assert!(mihoto
+            .validate_installed_config()
+            .unwrap_err()
+            .to_string()
+            .contains("failed to validate staged Mihomo config"));
+    }
+
+    #[test]
+    fn backup_restore_handles_existing_and_new_config_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let mihoto = test_mihoto(dir.path());
+        mihoto.ensure_config_root_secure().unwrap();
+        assert_eq!(
+            fs::metadata(&mihoto.mihomo_target_config_root)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o750
+        );
+
+        assert!(mihoto.backup_current_config().unwrap().is_none());
+        fs::write(&mihoto.mihomo_target_config_path, "old config").unwrap();
+        let backup = mihoto.backup_current_config().unwrap().unwrap();
+        assert_eq!(
+            backup.as_file().metadata().unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        fs::write(&mihoto.mihomo_target_config_path, "new config").unwrap();
+        assert!(mihoto.restore_config_backup(Some(backup)).unwrap());
+        assert_eq!(
+            fs::read_to_string(&mihoto.mihomo_target_config_path).unwrap(),
+            "old config"
+        );
+
+        fs::remove_file(&mihoto.mihomo_target_config_path).unwrap();
+        let no_backup = mihoto.backup_current_config().unwrap();
+        fs::write(&mihoto.mihomo_target_config_path, "newly created").unwrap();
+        assert!(!mihoto.restore_config_backup(no_backup).unwrap());
+        assert!(!Path::new(&mihoto.mihomo_target_config_path).exists());
+        assert!(!mihoto.restore_config_backup(None).unwrap());
+    }
+}
+
+impl Mihoto {
     async fn restart_and_verify_with_program(
         &self,
         systemctl_program: &Path,

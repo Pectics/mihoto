@@ -344,4 +344,162 @@ mod tests {
         assert_eq!(value["tun"]["device"], "mihoto-test");
         assert_eq!(value["rules"][0], "MATCH,DIRECT");
     }
+
+    #[test]
+    fn every_required_field_and_path_constraint_is_validated() {
+        let valid = Config {
+            remote_config_url: "https://example.com/config.yaml".to_string(),
+            ..Config::default()
+        };
+        assert!(validate_config(&valid).is_ok());
+
+        let required_cases: [(&str, fn(&mut Config)); 4] = [
+            ("remote_config_url", |config: &mut Config| {
+                config.remote_config_url.clear()
+            }),
+            ("mihomo_binary_path", |config: &mut Config| {
+                config.mihomo_binary_path.clear()
+            }),
+            ("mihomo_config_root", |config: &mut Config| {
+                config.mihomo_config_root.clear()
+            }),
+            ("mihoto_binary_path", |config: &mut Config| {
+                config.mihoto_binary_path.clear()
+            }),
+        ];
+        for (field, mutate) in required_cases {
+            let mut config = valid.clone();
+            mutate(&mut config);
+            assert_eq!(
+                validate_config(&config).unwrap_err().to_string(),
+                format!("`{field}` undefined")
+            );
+        }
+
+        let relative_path_cases: [(&str, fn(&mut Config)); 3] = [
+            ("mihoto_binary_path", |config: &mut Config| {
+                config.mihoto_binary_path = "bin/mihoto".to_string()
+            }),
+            ("mihomo_binary_path", |config: &mut Config| {
+                config.mihomo_binary_path = "bin/mihomo".to_string()
+            }),
+            ("mihomo_config_root", |config: &mut Config| {
+                config.mihomo_config_root = "etc/mihomo".to_string()
+            }),
+        ];
+        for (field, mutate) in relative_path_cases {
+            let mut config = valid.clone();
+            mutate(&mut config);
+            assert_eq!(
+                validate_config(&config).unwrap_err().to_string(),
+                format!("`{field}` must be an absolute path")
+            );
+        }
+
+        for interval in [0, 24] {
+            let mut config = valid.clone();
+            config.auto_update_interval = interval;
+            validate_config(&config).unwrap();
+        }
+    }
+
+    #[test]
+    fn manager_config_path_requires_a_file_component() {
+        let error = validate_manager_config_path(Path::new("/")).unwrap_err();
+        assert_eq!(error.to_string(), "manager config path must name a file: /");
+    }
+
+    #[test]
+    fn merge_applies_all_managed_fields_and_removes_optional_values() {
+        let raw = r#"
+port: 1
+socks-port: 2
+mixed-port: 3
+redir-port: 4
+allow-lan: true
+bind-address: 0.0.0.0
+mode: global
+log-level: debug
+ipv6: false
+external-controller: 0.0.0.0:9090
+external-ui: old-ui
+secret: old
+geodata-mode: true
+geo-auto-update: false
+geo-update-interval: 1
+geox-url:
+  geoip: old-ip
+  geosite: old-site
+  mmdb: old-mmdb
+unknown:
+  nested: preserved
+"#;
+        let override_config = MihomoConfig {
+            port: 1001,
+            socks_port: 1002,
+            mixed_port: None,
+            redir_port: None,
+            allow_lan: None,
+            bind_address: None,
+            mode: MihomoMode::Direct,
+            log_level: MihomoLogLevel::Warning,
+            ipv6: None,
+            external_controller: None,
+            external_ui: None,
+            secret: None,
+            geodata_mode: None,
+            geo_auto_update: None,
+            geo_update_interval: None,
+            geox_url: None,
+        };
+        let rendered = merge_mihomo_override(raw, &override_config)
+            .unwrap()
+            .expect("override changes every managed value");
+        let value: serde_yaml::Value = serde_yaml::from_str(&rendered).unwrap();
+        assert_eq!(value["port"], 1001);
+        assert_eq!(value["socks-port"], 1002);
+        assert_eq!(value["mode"], "direct");
+        assert_eq!(value["log-level"], "warning");
+        assert_eq!(value["unknown"]["nested"], "preserved");
+        for removed in [
+            "mixed-port",
+            "redir-port",
+            "allow-lan",
+            "bind-address",
+            "ipv6",
+            "external-controller",
+            "external-ui",
+            "secret",
+            "geodata-mode",
+            "geo-auto-update",
+            "geo-update-interval",
+            "geox-url",
+        ] {
+            assert!(value.get(removed).is_none(), "{removed} should be removed");
+        }
+    }
+
+    #[test]
+    fn merge_avoids_semantic_rewrites_and_rejects_malformed_yaml() {
+        let defaults = MihomoConfig::default();
+        let initial = merge_mihomo_override("rules: []\n", &defaults)
+            .unwrap()
+            .expect("defaults populate managed fields");
+        assert!(merge_mihomo_override(&initial, &defaults)
+            .unwrap()
+            .is_none());
+        assert!(merge_mihomo_override("port: [", &defaults).is_err());
+    }
+
+    #[test]
+    fn release_channel_aliases_roundtrip_to_canonical_values() {
+        for (raw, expected, rendered) in [
+            ("stable", MihomoChannel::Stable, "stable"),
+            ("alpha", MihomoChannel::Alpha, "alpha"),
+        ] {
+            let channel: MihomoChannel = serde_yaml::from_str(raw).unwrap();
+            assert_eq!(channel, expected);
+            assert_eq!(serde_yaml::to_string(&channel).unwrap().trim(), rendered);
+        }
+    }
 }

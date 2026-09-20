@@ -210,6 +210,10 @@ async fn download_file_once(
 mod tests {
     use super::*;
     use std::sync::{Mutex, OnceLock};
+    use wiremock::{
+        matchers::{header, method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -233,5 +237,90 @@ mod tests {
             "https://example.com/file.tar.gz"
         );
         std::env::remove_var(MIHOTO_GITHUB_MIRROR_ENV);
+    }
+
+    #[test]
+    fn mirror_resolution_handles_empty_invalid_content_and_existing_prefixes() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::remove_var(MIHOTO_GITHUB_MIRROR_ENV);
+        assert!(matches!(
+            resolve_download_url("https://github.com/example/file"),
+            Cow::Borrowed(_)
+        ));
+
+        std::env::set_var(MIHOTO_GITHUB_MIRROR_ENV, "   ");
+        assert_eq!(
+            resolve_download_url("https://github.com/example/file").as_ref(),
+            "https://github.com/example/file"
+        );
+
+        std::env::set_var(MIHOTO_GITHUB_MIRROR_ENV, "https://mirror.example///");
+        assert_eq!(
+            resolve_download_url("https://raw.githubusercontent.com/a/b/file").as_ref(),
+            "https://mirror.example/https://raw.githubusercontent.com/a/b/file"
+        );
+        assert_eq!(
+            resolve_download_url("https://mirror.example/already").as_ref(),
+            "https://mirror.example/already"
+        );
+        assert_eq!(resolve_download_url("not a url").as_ref(), "not a url");
+        assert_eq!(
+            resolve_download_url("file:///tmp/file").as_ref(),
+            "file:///tmp/file"
+        );
+        std::env::remove_var(MIHOTO_GITHUB_MIRROR_ENV);
+    }
+
+    #[test]
+    fn retry_strategy_is_bounded_to_the_documented_attempt_count() {
+        let delays = retry_strategy().collect::<Vec<_>>();
+        assert_eq!(delays.len(), MAX_RETRIES);
+        assert!(delays.iter().all(|delay| *delay <= Duration::from_secs(5)));
+    }
+
+    #[tokio::test]
+    async fn single_download_sends_user_agent_and_replaces_destination() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/asset"))
+            .and(header("user-agent", "mihoto-test"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"new contents"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("nested/asset");
+        download_file_once(
+            &Client::new(),
+            &format!("{}/asset", server.uri()),
+            &target,
+            "mihoto-test",
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new contents");
+    }
+
+    #[tokio::test]
+    async fn failed_http_status_does_not_create_destination() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/missing"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("missing");
+        assert!(download_file_once(
+            &Client::new(),
+            &format!("{}/missing", server.uri()),
+            &target,
+            "mihoto-test",
+        )
+        .await
+        .is_err());
+        assert!(!target.exists());
     }
 }

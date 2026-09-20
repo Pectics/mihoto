@@ -164,4 +164,45 @@ mod tests {
         assert_eq!(toml::to_string(&decoded)?.trim(), encoded);
         Ok(())
     }
+
+    #[test]
+    fn parse_trims_values_and_rejects_every_invalid_shape() {
+        assert_eq!(Ui::parse("  zashboard  ").unwrap(), Ui::Zashboard);
+        for (raw, message) in [
+            ("", "ui must not be empty"),
+            ("   ", "ui must not be empty"),
+            ("unknown", "unsupported ui `unknown`"),
+            ("custom:", "custom ui download url must not be empty"),
+        ] {
+            assert_eq!(Ui::parse(raw).unwrap_err().to_string(), message);
+        }
+    }
+
+    #[test]
+    fn every_ui_variant_serializes_to_its_config_value() {
+        for (ui, encoded) in [
+            (Ui::Metacubexd, "ui = \"metacubexd\"\n"),
+            (Ui::Zashboard, "ui = \"zashboard\"\n"),
+            (Ui::YacdMeta, "ui = \"yacd-meta\"\n"),
+            (
+                Ui::Custom("https://example.com/custom.tgz".to_string()),
+                "ui = \"custom:https://example.com/custom.tgz\"\n",
+            ),
+        ] {
+            assert_eq!(
+                toml::to_string(&UiConfig { ui: ui.clone() }).unwrap(),
+                encoded
+            );
+            let decoded: UiConfig = toml::from_str(encoded).unwrap();
+            assert_eq!(decoded.ui, ui);
+        }
+    }
+
+    #[test]
+    fn custom_download_url_is_used_verbatim() {
+        let ui = Ui::Custom("https://example.com/assets.tar.gz".to_string());
+        assert_eq!(ui.as_config_value(), "https://example.com/assets.tar.gz");
+        assert_eq!(ui.download_url(), "https://example.com/assets.tar.gz");
+        assert_eq!(default_ui(), Some(Ui::Metacubexd));
+    }
 }

@@ -262,6 +262,12 @@ fn atomic_replace(candidate: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flate2::{write::GzEncoder, Compression};
+    use tar::{Builder, Header};
+    use wiremock::{
+        matchers::{method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
 
     fn release(tag_name: &str, prerelease: bool, draft: bool) -> Release {
         Release {
@@ -309,5 +315,117 @@ mod tests {
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         );
         assert!(checksum_for_asset(sums, "mihoto-v1.0.0").is_err());
+    }
+
+    fn asset(name: &str, url: &str) -> ReleaseAsset {
+        ReleaseAsset {
+            name: name.to_string(),
+            browser_download_url: url.to_string(),
+        }
+    }
+
+    fn archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let encoder = GzEncoder::new(Vec::new(), Compression::default());
+        let mut builder = Builder::new(encoder);
+        for (path, body) in entries {
+            let mut header = Header::new_gnu();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder.append_data(&mut header, path, *body).unwrap();
+        }
+        builder.into_inner().unwrap().finish().unwrap()
+    }
+
+    #[test]
+    fn stable_selection_handles_empty_and_invalid_release_sets() {
+        assert!(latest_stable(&[]).is_none());
+        assert!(latest_stable(&[release("not-semver", false, false)]).is_none());
+        assert!(latest_stable(&[
+            release("v2.0.0", false, true),
+            release("v1.0.0", true, false),
+        ])
+        .is_none());
+    }
+
+    #[test]
+    fn asset_and_checksum_validation_cover_exact_matching_rules() {
+        let mut release = release("v1.0.0", false, false);
+        release.assets = vec![asset("binary", "https://example.com/binary")];
+        assert_eq!(find_asset(&release, "binary").unwrap().name, "binary");
+        assert!(find_asset(&release, "missing").is_err());
+
+        let uppercase = format!("{} *binary\n", "A".repeat(64));
+        assert_eq!(
+            checksum_for_asset(&uppercase, "binary").unwrap(),
+            "a".repeat(64)
+        );
+        for sums in [
+            format!("{}  binary\n{}  binary\n", "a".repeat(64), "b".repeat(64)),
+            "abc  binary\n".to_string(),
+            format!("{}  binary\n", "z".repeat(64)),
+        ] {
+            assert!(checksum_for_asset(&sums, "binary").is_err());
+        }
+    }
+
+    #[test]
+    fn checksum_verification_accepts_only_the_exact_archive_digest() {
+        let body = b"release archive";
+        let checksum = format!("{:x}", Sha256::digest(body));
+        verify_checksum(&checksum, body).unwrap();
+        assert!(verify_checksum(&"0".repeat(64), body).is_err());
+    }
+
+    #[test]
+    fn extraction_requires_exactly_one_root_mihoto_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let candidate = extract_binary(&archive(&[("mihoto", b"binary")]), dir.path()).unwrap();
+        assert_eq!(fs::read(candidate).unwrap(), b"binary");
+
+        let empty = archive(&[]);
+        assert!(extract_binary(&empty, dir.path()).is_err());
+        assert!(extract_binary(&archive(&[("nested/mihoto", b"binary")]), dir.path()).is_err());
+        assert!(extract_binary(
+            &archive(&[("mihoto", b"one"), ("mihoto", b"two")]),
+            dir.path()
+        )
+        .is_err());
+        assert!(extract_binary(b"not gzip", dir.path()).is_err());
+    }
+
+    #[tokio::test]
+    async fn asset_download_uses_release_url_and_reports_http_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/asset"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"asset bytes"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let downloaded = download_asset(
+            &Client::new(),
+            &asset("binary", &format!("{}/asset", server.uri())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(downloaded, b"asset bytes");
+
+        Mock::given(method("GET"))
+            .and(path("/missing"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        assert!(download_asset(
+            &Client::new(),
+            &asset("missing", &format!("{}/missing", server.uri())),
+        )
+        .await
+        .is_err());
+    }
+
+    #[test]
+    fn github_client_has_a_valid_default_configuration() {
+        github_client().unwrap();
     }
 }

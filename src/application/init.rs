@@ -335,3 +335,273 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod branch_tests {
+    use super::*;
+    use crate::application::{ports::StageEvents, stage::StageEntry};
+    use std::{
+        cell::RefCell,
+        future::{ready, Future},
+        rc::Rc,
+    };
+
+    struct ScenarioOperations {
+        calls: RefCell<Vec<String>>,
+        fail_on: Option<&'static str>,
+        skip_binary: bool,
+    }
+
+    impl ScenarioOperations {
+        fn new(fail_on: Option<&'static str>, skip_binary: bool) -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+                fail_on,
+                skip_binary,
+            }
+        }
+
+        fn status(&self, name: &'static str) -> Result<StageStatus> {
+            self.calls.borrow_mut().push(name.to_string());
+            if self.fail_on == Some(name) {
+                anyhow::bail!("{name} failed");
+            }
+            Ok(StageStatus::Installed)
+        }
+    }
+
+    impl InitOperations for ScenarioOperations {
+        type BinaryHandle = &'static str;
+
+        fn prepare_binary(
+            &self,
+            force: bool,
+            arch: Option<&str>,
+        ) -> impl Future<Output = Result<BinaryPlan<Self::BinaryHandle>>> {
+            self.calls
+                .borrow_mut()
+                .push(format!("prepare:{force}:{arch:?}"));
+            ready(if self.fail_on == Some("prepare") {
+                Err(anyhow::anyhow!("prepare failed"))
+            } else if self.skip_binary {
+                Ok(BinaryPlan::Skip("already installed".to_string()))
+            } else {
+                Ok(BinaryPlan::Install("binary handle"))
+            })
+        }
+
+        fn install_binary(
+            &self,
+            handle: Self::BinaryHandle,
+        ) -> impl Future<Output = Result<StageStatus>> {
+            assert_eq!(handle, "binary handle");
+            ready(self.status("install"))
+        }
+
+        fn ensure_remote_config(&self, force: bool) -> impl Future<Output = Result<StageStatus>> {
+            self.calls
+                .borrow_mut()
+                .push(format!("remote force:{force}"));
+            ready(if self.fail_on == Some("remote") {
+                Err(anyhow::anyhow!("remote failed"))
+            } else {
+                Ok(StageStatus::Installed)
+            })
+        }
+
+        fn ensure_geodata(&self, force: bool) -> impl Future<Output = Result<StageStatus>> {
+            self.calls
+                .borrow_mut()
+                .push(format!("geodata force:{force}"));
+            ready(if self.fail_on == Some("geodata") {
+                Err(anyhow::anyhow!("geodata failed"))
+            } else {
+                Ok(StageStatus::Installed)
+            })
+        }
+
+        fn ensure_ui(&self, force: bool) -> impl Future<Output = Result<StageStatus>> {
+            self.calls.borrow_mut().push(format!("ui force:{force}"));
+            ready(if self.fail_on == Some("ui") {
+                Err(anyhow::anyhow!("ui failed"))
+            } else {
+                Ok(StageStatus::Installed)
+            })
+        }
+
+        fn validate_installed_config(&self) -> Result<StageStatus> {
+            self.status("validate")
+        }
+
+        fn ensure_service(&self) -> impl Future<Output = Result<StageStatus>> {
+            ready(self.status("service"))
+        }
+
+        fn ensure_service_running(&self) -> impl Future<Output = Result<StageStatus>> {
+            ready(self.status("service running"))
+        }
+
+        fn reconcile_timer(&self, config_path: &str) -> Result<StageStatus> {
+            self.calls.borrow_mut().push(format!("timer:{config_path}"));
+            if self.fail_on == Some("timer") {
+                anyhow::bail!("timer failed");
+            }
+            Ok(StageStatus::Installed)
+        }
+    }
+
+    #[derive(Default)]
+    struct EventLog {
+        initializing: usize,
+        dashboard: usize,
+        summaries: Vec<Vec<String>>,
+    }
+
+    struct RecordingEvents(Rc<RefCell<EventLog>>);
+
+    impl StageEvents for RecordingEvents {
+        fn begin(&mut self, _name: &'static str, _description: Option<&str>) {}
+
+        fn summary(&mut self, _label: &str, entries: &[StageEntry]) {
+            self.0.borrow_mut().summaries.push(
+                entries
+                    .iter()
+                    .map(|entry| format!("{}:{:?}", entry.name, entry.status))
+                    .collect(),
+            );
+        }
+    }
+
+    impl InitEvents for RecordingEvents {
+        fn initializing(&mut self) {
+            self.0.borrow_mut().initializing += 1;
+        }
+
+        fn dashboard(&mut self, _config: &Config) {
+            self.0.borrow_mut().dashboard += 1;
+        }
+    }
+
+    fn events() -> (RecordingEvents, Rc<RefCell<EventLog>>) {
+        let log = Rc::new(RefCell::new(EventLog::default()));
+        (RecordingEvents(log.clone()), log)
+    }
+
+    #[tokio::test]
+    async fn options_and_config_path_are_forwarded_when_binary_is_current() {
+        let operations = ScenarioOperations::new(None, true);
+        let (events, log) = events();
+        run(
+            "/custom/mihoto.toml",
+            &Config::default(),
+            &operations,
+            InitOptions {
+                force: true,
+                arch: Some("arm64".to_string()),
+            },
+            events,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *operations.calls.borrow(),
+            [
+                "prepare:true:Some(\"arm64\")",
+                "remote force:true",
+                "geodata force:true",
+                "ui force:true",
+                "validate",
+                "service",
+                "service running",
+                "timer:/custom/mihoto.toml"
+            ]
+        );
+        assert_eq!(log.borrow().initializing, 1);
+        assert_eq!(log.borrow().dashboard, 1);
+    }
+
+    #[tokio::test]
+    async fn binary_and_remote_failures_skip_every_install_phase() {
+        for failure in ["prepare", "remote"] {
+            let operations = ScenarioOperations::new(Some(failure), false);
+            let (events, log) = events();
+            assert!(run(
+                "/etc/mihoto.toml",
+                &Config::default(),
+                &operations,
+                InitOptions {
+                    force: false,
+                    arch: None,
+                },
+                events,
+            )
+            .await
+            .is_err());
+            assert_eq!(operations.calls.borrow().len(), 4);
+            assert!(operations.calls.borrow()[1].starts_with("remote"));
+            assert!(operations.calls.borrow()[2].starts_with("geodata"));
+            assert!(operations.calls.borrow()[3].starts_with("ui"));
+            assert_eq!(log.borrow().dashboard, 1);
+            assert!(log.borrow().summaries[0]
+                .iter()
+                .any(|entry| entry.starts_with("update timer:Skipped")));
+        }
+    }
+
+    #[tokio::test]
+    async fn sequential_failures_stop_only_the_dependent_tail() {
+        for (failure, expected_last_call) in [
+            ("install", "install"),
+            ("validate", "validate"),
+            ("service", "service"),
+            ("service running", "service running"),
+            ("timer", "timer:/etc/mihoto.toml"),
+        ] {
+            let operations = ScenarioOperations::new(Some(failure), false);
+            let (events, log) = events();
+            let result = run(
+                "/etc/mihoto.toml",
+                &Config::default(),
+                &operations,
+                InitOptions {
+                    force: false,
+                    arch: None,
+                },
+                events,
+            )
+            .await;
+            assert!(result.is_err(), "{failure} should fail init");
+            assert_eq!(
+                operations.calls.borrow().last().unwrap(),
+                expected_last_call
+            );
+            assert_eq!(log.borrow().dashboard, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn optional_download_failure_allows_service_setup_but_skips_timer() {
+        for failure in ["geodata", "ui"] {
+            let operations = ScenarioOperations::new(Some(failure), false);
+            let (events, log) = events();
+            assert!(run(
+                "/etc/mihoto.toml",
+                &Config::default(),
+                &operations,
+                InitOptions {
+                    force: false,
+                    arch: None,
+                },
+                events,
+            )
+            .await
+            .is_err());
+            assert_eq!(operations.calls.borrow().last().unwrap(), "service running");
+            assert_eq!(
+                log.borrow().summaries[0].last().unwrap(),
+                "update timer:Skipped(\"skipped due to earlier failures\")"
+            );
+        }
+    }
+}
