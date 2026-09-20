@@ -34,9 +34,9 @@ for required in \
 	grep -Fqi -- "$required" "$contract" README.md "$release_notes"
 done
 
-grep -Fq 'command_requires_root' src/main.rs
-grep -Fq 'Commands::Upgrade { check: true' src/main.rs
-grep -Fq 'SHA256SUMS' src/upgrade.rs
-grep -Fq 'atomic_replace' src/upgrade.rs
+grep -Fq 'command_requires_root' src/cli/policy.rs
+grep -Fq 'Commands::Upgrade { check: true' src/cli/policy.rs
+grep -Fq 'SHA256SUMS' src/infrastructure/upgrade.rs
+grep -Fq 'atomic_replace' src/infrastructure/upgrade.rs
 scripts/check-system-scope.sh
 scripts/check-release-workflow.sh

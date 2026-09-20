@@ -1,6 +1,6 @@
-use crate::config::Config;
-use crate::systemctl::Systemctl;
-use crate::utils::systemd_escape_exec_arg;
+use crate::domain::config::Config;
+use crate::infrastructure::systemctl::Systemctl;
+use crate::infrastructure::systemd_unit::escape_exec_arg;
 use anyhow::{bail, Result};
 use std::{fs, io::Write, os::unix::fs::PermissionsExt, path::Path};
 use tempfile::NamedTempFile;
@@ -11,8 +11,8 @@ pub const TIMER_PATH: &str = "/etc/systemd/system/mihoto-update.timer";
 pub fn render_service(config: &Config, config_path: &str) -> String {
     format!(
 		"[Unit]\nDescription=Update Mihomo through mihoto\nWants=network-online.target\nAfter=network-online.target\n\n[Service]\nType=oneshot\nUser=root\nExecStart={} --config {} update\n",
-		systemd_escape_exec_arg(&config.mihoto_binary_path),
-		systemd_escape_exec_arg(config_path)
+		escape_exec_arg(&config.mihoto_binary_path),
+		escape_exec_arg(config_path)
 	)
 }
 pub fn render_timer(interval: u16) -> Result<String> {

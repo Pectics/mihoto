@@ -1,12 +1,9 @@
-use crate::ui::{default_ui, Ui};
-use crate::utils::create_parent_dir;
+use crate::domain::ui::{default_ui, Ui};
 
-use std::{collections::HashMap, fs, io::Write, path::Path};
+use std::{collections::HashMap, path::Path};
 
 use anyhow::{bail, Result};
-use colored::Colorize;
 use serde::{Deserialize, Serialize};
-use tempfile::NamedTempFile;
 
 /// Mihomo release channel for automatic binary fetching.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
@@ -145,39 +142,6 @@ pub struct GeoxUrl {
     pub mmdb: String,
 }
 
-impl Config {
-    pub fn new() -> Config {
-        Config::default()
-    }
-
-    /// Read raw config string from path and parse with crate toml.
-    pub fn setup_from(path: &str) -> Result<Config> {
-        let raw_config = fs::read_to_string(path)?;
-        let config: Config = toml::from_str(&raw_config)?;
-        Ok(config)
-    }
-
-    pub fn write(&mut self, path: &Path) -> Result<()> {
-        let serialized_config = toml::to_string(&self)?;
-        create_parent_dir(path)?;
-        let parent = path
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("config path has no parent: {}", path.display()))?;
-        let mut staged = NamedTempFile::new_in(parent)?;
-        staged.write_all(serialized_config.as_bytes())?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            staged
-                .as_file()
-                .set_permissions(fs::Permissions::from_mode(0o600))?;
-        }
-        staged.as_file().sync_all()?;
-        staged.persist(path).map_err(|error| error.error)?;
-        Ok(())
-    }
-}
-
 pub fn validate_manager_config_path(path: &Path) -> Result<()> {
     if !path.is_absolute() {
         bail!("manager config path must be absolute: {}", path.display());
@@ -186,26 +150,6 @@ pub fn validate_manager_config_path(path: &Path) -> Result<()> {
         bail!("manager config path must name a file: {}", path.display());
     }
     Ok(())
-}
-
-/// Load config from path without validation.  Returns `Ok(None)` if the file does not exist.
-pub fn load_config(path: &str) -> Result<Option<Config>> {
-    let config_path = Path::new(path);
-    if !config_path.exists() {
-        return Ok(None);
-    }
-    Ok(Some(Config::setup_from(path)?))
-}
-
-/// Write default config to path if it does not exist.  Returns `true` if the file was created.
-pub fn write_default_if_missing(path: &str) -> Result<bool> {
-    let config_path = Path::new(path);
-    create_parent_dir(config_path)?;
-    if config_path.exists() {
-        return Ok(false);
-    }
-    Config::new().write(config_path)?;
-    Ok(true)
 }
 
 /// Validate that required config fields are non-empty.
@@ -234,25 +178,6 @@ pub fn validate_config(config: &Config) -> Result<()> {
         bail!("`auto_update_interval` must be between 0 and 24 hours");
     }
     Ok(())
-}
-
-/// Tries to parse mihoto config as toml from path.
-///
-/// * If config file does not exist, returns an error directing the user to run `mihoto init`.
-/// * If found, parses the file and validates required fields.
-pub fn parse_config(path: &str) -> Result<Config> {
-    let config_path = Path::new(path);
-
-    if !config_path.exists() {
-        bail!(
-            "config `{}` does not exist; run `mihoto init` first",
-            path.underline()
-        );
-    }
-
-    let config = Config::setup_from(path)?;
-    validate_config(&config)?;
-    Ok(config)
 }
 
 /// `mihomoYamlConfig` is defined to support serde serialization and deserialization of arbitrary
@@ -317,19 +242,11 @@ pub struct MihomoYamlConfig {
     extra: HashMap<String, serde_yaml::Value>,
 }
 
-/// Apply config overrides to mihomo's `config.yaml`.
-///
-/// Only a subset of mihomo's config fields are supported, as defined in `mihomoConfig`.
-///
-/// Rules:
-/// * Fields defined in `mihoto.toml` will override the downloaded remote `config.yaml`.
-/// * Fields undefined will be removed from the downloaded `config.yaml`.
-/// * Fields not supported by `mihoto` will be kept as is.
-///
-/// Returns `true` when the file contents had to change.
-pub fn apply_mihomo_override(path: &str, override_config: &MihomoConfig) -> Result<bool> {
-    let raw_mihomo_yaml = fs::read_to_string(path)?;
-    let mut mihomo_yaml: MihomoYamlConfig = serde_yaml::from_str(&raw_mihomo_yaml)?;
+pub fn merge_mihomo_override(
+    raw_mihomo_yaml: &str,
+    override_config: &MihomoConfig,
+) -> Result<Option<String>> {
+    let mut mihomo_yaml: MihomoYamlConfig = serde_yaml::from_str(raw_mihomo_yaml)?;
 
     // Apply config overrides
     mihomo_yaml.port = Some(override_config.port);
@@ -351,20 +268,18 @@ pub fn apply_mihomo_override(path: &str, override_config: &MihomoConfig) -> Resu
 
     // Avoid rewriting already-current YAML just because formatting or map order changed.
     let serialized_mihomo_yaml = serde_yaml::to_string(&mihomo_yaml)?;
-    let raw_value: serde_yaml::Value = serde_yaml::from_str(&raw_mihomo_yaml)?;
+    let raw_value: serde_yaml::Value = serde_yaml::from_str(raw_mihomo_yaml)?;
     let serialized_value: serde_yaml::Value = serde_yaml::from_str(&serialized_mihomo_yaml)?;
     if raw_value == serialized_value {
-        return Ok(false);
+        return Ok(None);
     }
 
-    fs::write(path, serialized_mihomo_yaml)?;
-    Ok(true)
+    Ok(Some(serialized_mihomo_yaml))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn system_defaults_and_validation() {
@@ -387,16 +302,9 @@ mod tests {
     }
 
     #[test]
-    fn old_fields_are_rejected_and_config_is_private() {
+    fn old_fields_are_rejected() {
         assert!(
             toml::from_str::<Config>(&format!("{}{} = '/tmp'", "user_", "systemd_root")).is_err()
-        );
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("mihoto.toml");
-        Config::default().write(&path).unwrap();
-        assert_eq!(
-            fs::metadata(path).unwrap().permissions().mode() & 0o777,
-            0o600
         );
     }
 
@@ -418,15 +326,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_config_does_not_create_a_missing_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("missing.toml");
-        let error = parse_config(path.to_str().unwrap()).unwrap_err();
-        assert!(error.to_string().contains("does not exist"));
-        assert!(!path.exists());
-    }
-
-    #[test]
     fn manager_config_path_must_be_absolute() {
         assert!(validate_manager_config_path(Path::new("/etc/mihoto.toml")).is_ok());
         assert!(validate_manager_config_path(Path::new("mihoto.toml")).is_err());
@@ -434,18 +333,12 @@ mod tests {
     }
 
     #[test]
-    fn applying_overrides_preserves_tun_values() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.yaml");
-        fs::write(
-			&path,
-			"tun:\n  enable: true\n  stack: system\n  device: mihoto-test\nrules:\n  - MATCH,DIRECT\n",
-		)
-		.unwrap();
-
-        apply_mihomo_override(path.to_str().unwrap(), &MihomoConfig::default()).unwrap();
-        let value: serde_yaml::Value =
-            serde_yaml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    fn merging_overrides_preserves_tun_values() {
+        let raw = "tun:\n  enable: true\n  stack: system\n  device: mihoto-test\nrules:\n  - MATCH,DIRECT\n";
+        let rendered = merge_mihomo_override(raw, &MihomoConfig::default())
+            .unwrap()
+            .expect("defaults change the input");
+        let value: serde_yaml::Value = serde_yaml::from_str(&rendered).unwrap();
         assert_eq!(value["tun"]["enable"], true);
         assert_eq!(value["tun"]["stack"], "system");
         assert_eq!(value["tun"]["device"], "mihoto-test");

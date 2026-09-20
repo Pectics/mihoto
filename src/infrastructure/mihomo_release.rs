@@ -1,5 +1,7 @@
-use crate::config::{Config, MihomoChannel};
-use crate::utils::{resolve_download_url, retry_strategy, DETAIL_PREFIX, MAX_RETRIES};
+use crate::domain::config::{Config, MihomoChannel};
+use crate::infrastructure::download::{
+    resolve_download_url, retry_strategy, DETAIL_PREFIX, MAX_RETRIES,
+};
 
 use anyhow::{bail, Context, Result};
 use colored::Colorize;
