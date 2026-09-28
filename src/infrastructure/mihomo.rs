@@ -40,5 +40,4 @@ use service::render_service_string;
 use uninstall::validate_safe_purge_target;
 
 #[cfg(test)]
-#[cfg(test)]
 mod tests;
