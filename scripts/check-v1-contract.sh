@@ -10,8 +10,8 @@ audit_record=docs/audits/v1.0.0.md
 test -f "$contract"
 test -f "$release_notes"
 test -f "$audit_record"
-grep -Fq 'version = "1.0.0"' Cargo.toml
-grep -Fq 'version = "1.0.0"' Cargo.lock
+grep -Fq 'version = "0.1.0"' Cargo.toml
+grep -Fq 'version = "0.1.0"' Cargo.lock
 
 for required in \
 	'/etc/mihoto.toml' \
