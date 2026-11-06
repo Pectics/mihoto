@@ -88,7 +88,7 @@ Use `--version <semver>` for a specific stable release or release candidate:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Pectics/mihoto/main/install.sh \
-  | sudo sh -s -- --version v1.0.0
+  | sudo sh -s -- --version v0.1.0
 ```
 
 `--mirror` may proxy archive downloads. GitHub release metadata and `SHA256SUMS`
@@ -233,10 +233,8 @@ Release acceptance covers Ubuntu 22.04 and Ubuntu 24.04 on x86_64, plus a separa
 native or virtualized aarch64 systemd/TUN host. Containers without the required
 privileges, non-systemd Linux, Android, BSD, macOS, and Windows are not supported.
 
-The stable **1.x product contract** defines the supported commands, system paths,
-and failure behavior. Read the [public contract](docs/v1-contract.md),
-[v1.0.0 release notes](docs/releases/v1.0.0.md), and
-[acceptance record](docs/audits/v1.0.0.md) for details.
+Versioning starts at **0.1.0**. The package version is updated when preparing a release.
+Releases require automated checks and real x86_64 and aarch64 systemd/TUN acceptance.
 
 ## Updates and verification
 
@@ -247,6 +245,11 @@ sudo mihoto update --all   # Subscription, geodata, dashboard, and Mihomo core
 mihoto upgrade --check    # Check for a newer stable Mihoto release
 sudo mihoto upgrade      # Verify and install the manager upgrade
 ```
+
+Mihomo core updates run the staged binary and validate the current configuration
+before replacement. Failed startup or health verification restores the previous
+core, its permissions, and the prior service state. If restoring the file fails,
+the error reports the retained backup path for manual recovery.
 
 Self-upgrade selects a newer stable semantic version and ignores pre-releases by
 default. It verifies `SHA256SUMS`, validates the archive, smoke-tests the staged
@@ -262,7 +265,7 @@ and checksum file, run:
 
 ```sh
 sha256sum --check --ignore-missing SHA256SUMS
-gh attestation verify mihoto-v1.0.0-x86_64-unknown-linux-gnu.tar.gz \
+gh attestation verify mihoto-v0.1.0-x86_64-unknown-linux-gnu.tar.gz \
   --repo Pectics/mihoto
 ```
 
@@ -367,7 +370,7 @@ cargo test --all-targets
 cargo test --all-targets --no-default-features
 scripts/check-system-scope.sh
 scripts/check-release-workflow.sh
-scripts/check-v1-contract.sh
+scripts/check-product-contract.sh
 scripts/test-installer-contract.sh
 ```
 

@@ -82,7 +82,7 @@ HTTP/SOCKS 混合代理监听端口为 **7890**。远程服务器的访问方式
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Pectics/mihoto/main/install.sh \
-  | sudo sh -s -- --version v1.0.0
+  | sudo sh -s -- --version v0.1.0
 ```
 
 `--mirror` 可为压缩包下载设置代理，但验证仍以 GitHub 发布元数据和 `SHA256SUMS` 为准。
@@ -214,9 +214,8 @@ GUI 客户端导出的配置可能省略由客户端在运行时注入的 DNS �
 发布验收覆盖 x86_64 上的 Ubuntu 22.04 和 Ubuntu 24.04，以及独立的原生或虚拟化
 aarch64 systemd/TUN 主机。不支持权限不足的容器、非 systemd Linux、Android、BSD、macOS 和 Windows。
 
-稳定的 **1.x 产品契约**定义了受支持的命令、系统路径和失败处理行为。
-详情参见[公共契约](docs/v1-contract.md)、[v1.0.0 发布说明](docs/releases/v1.0.0.md)
-和[验收记录](docs/audits/v1.0.0.md)（英文）。
+版本从 **0.1.0** 起算，准备发布时更新程序版本号。
+正式发布需通过自动化检查，以及 x86_64 和 aarch64 的真实 systemd/TUN 验收。
 
 ## 更新与验证
 
@@ -227,6 +226,10 @@ sudo mihoto update --all   # 更新订阅、地理数据、面板与 Mihomo 内�
 mihoto upgrade --check    # 检查是否有更新的 Mihoto 稳定版
 sudo mihoto upgrade      # 验证并安装管理器升级
 ```
+
+Mihomo 内核更新会先运行暂存程序并校验当前配置，再替换内核。启动或健康检查失败时，
+恢复旧内核、文件权限和原服务状态。若文件恢复失败，错误信息会给出保留的备份路径，
+供手动恢复。
 
 自升级按语义化版本选择更新的稳定版，默认忽略预发布版本。升级过程会验证 `SHA256SUMS`、
 校验压缩包、对暂存的可执行文件进行冒烟测试，再原子替换管理器程序。
@@ -240,7 +243,7 @@ sudo mihoto upgrade      # 验证并安装管理器升级
 
 ```sh
 sha256sum --check --ignore-missing SHA256SUMS
-gh attestation verify mihoto-v1.0.0-x86_64-unknown-linux-gnu.tar.gz \
+gh attestation verify mihoto-v0.1.0-x86_64-unknown-linux-gnu.tar.gz \
   --repo Pectics/mihoto
 ```
 
@@ -336,7 +339,7 @@ cargo test --all-targets
 cargo test --all-targets --no-default-features
 scripts/check-system-scope.sh
 scripts/check-release-workflow.sh
-scripts/check-v1-contract.sh
+scripts/check-product-contract.sh
 scripts/test-installer-contract.sh
 ```
 
