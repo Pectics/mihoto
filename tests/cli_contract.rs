@@ -59,7 +59,7 @@ fn read_only_commands_do_not_need_config_or_real_systemd() {
             .assert()
             .success();
     }
-    let calls = fs::read_to_string(log).unwrap();
+    let calls = fs::read_to_string(&log).unwrap();
     assert!(calls.contains("status mihomo.service"));
     assert!(calls.contains("status mihoto-update.timer"));
     assert!(!calls.contains("--user"));
@@ -69,6 +69,26 @@ fn read_only_commands_do_not_need_config_or_real_systemd() {
         .assert()
         .success()
         .stdout(predicate::str::contains("mihoto"));
+
+    let legacy_path = dir.path().join("legacy.toml");
+    let legacy = "remote_config_url = 'file:///tmp/source.yaml' # keep\n";
+    fs::write(&legacy_path, legacy).unwrap();
+    for args in [
+        vec!["status"],
+        vec!["timer", "status"],
+        vec!["completions", "bash"],
+    ] {
+        Command::cargo_bin("mihoto")
+            .unwrap()
+            .arg("--config")
+            .arg(&legacy_path)
+            .args(args)
+            .env("PATH", &path)
+            .env("CALL_LOG", &log)
+            .assert()
+            .success();
+        assert_eq!(fs::read_to_string(&legacy_path).unwrap(), legacy);
+    }
 }
 
 #[cfg(unix)]

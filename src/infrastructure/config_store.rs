@@ -1,31 +1,67 @@
 use crate::domain::config::{merge_mihomo_override, validate_config, Config, MihomoConfig};
 use crate::infrastructure::filesystem::create_parent_dir;
 
-use std::{fs, io::Write, path::Path};
+use std::{collections::BTreeMap, fs, io::Write, path::Path};
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use colored::Colorize;
 use tempfile::NamedTempFile;
 
-/// Load the manager configuration without validating required values.
+/// Load the manager configuration and atomically migrate legacy field names.
+/// Required values may be absent during interactive initialization.
 pub fn load_config(path: &str) -> Result<Option<Config>> {
     let config_path = Path::new(path);
     if !config_path.exists() {
         return Ok(None);
     }
     let raw = fs::read_to_string(config_path)?;
-    Ok(Some(toml::from_str(&raw)?))
+    // Reject malformed, unknown, or conflicting fields before changing the file.
+    let config = toml::from_str(&raw)?;
+    if let Some(migrated) = migrate_config_url(&raw)? {
+        // Keep symlinks intact by replacing the file they refer to.
+        let target = fs::canonicalize(config_path)?;
+        write_config_contents(&migrated, &target).with_context(|| {
+            format!(
+                "failed to migrate remote_config_url to config_url in {}",
+                config_path.display()
+            )
+        })?;
+    }
+    Ok(Some(config))
+}
+
+fn migrate_config_url(raw: &str) -> Result<Option<String>> {
+    // Key spans let us change only the root key, preserving all other bytes.
+    let fields: BTreeMap<toml::Spanned<String>, serde::de::IgnoredAny> = toml::from_str(raw)?;
+    let Some(key) = fields
+        .keys()
+        .find(|key| key.get_ref() == "remote_config_url")
+    else {
+        return Ok(None);
+    };
+    let span = key.span();
+    let replacement = match raw[span.clone()].chars().next() {
+        Some(quote @ ('\'' | '"')) => format!("{quote}config_url{quote}"),
+        _ => "config_url".to_string(),
+    };
+    let mut migrated = raw.to_string();
+    migrated.replace_range(span, &replacement);
+    Ok(Some(migrated))
 }
 
 /// Persist the manager configuration atomically with private permissions.
 pub fn write_config(config: &Config, path: &Path) -> Result<()> {
     let serialized = toml::to_string(config)?;
+    write_config_contents(&serialized, path)
+}
+
+fn write_config_contents(contents: &str, path: &Path) -> Result<()> {
     create_parent_dir(path)?;
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("config path has no parent: {}", path.display()))?;
     let mut staged = NamedTempFile::new_in(parent)?;
-    staged.write_all(serialized.as_bytes())?;
+    staged.write_all(contents.as_bytes())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -74,7 +110,79 @@ pub fn apply_mihomo_override(path: &str, override_config: &MihomoConfig) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+
+    #[test]
+    fn legacy_field_migration_changes_only_the_key_and_is_idempotent() {
+        for (old, new) in [
+            ("remote_config_url", "config_url"),
+            ("'remote_config_url'", "'config_url'"),
+            ("\"remote_config_url\"", "\"config_url\""),
+            ("\"remote_\\u0063onfig_url\"", "\"config_url\""),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("mihoto.toml");
+            let raw = format!(
+                "# 订阅 remote_config_url\r\nauto_update_interval=0\r\n {old}\t= 'file:///tmp/remote_config_url.yaml' # keep\r\n\r\n[mihomo_config]\r\nsecret = 'remote_config_url'\r\nmixed_port=7890\r\n"
+            );
+            fs::write(&path, &raw).unwrap();
+            let config = parse_config(path.to_str().unwrap()).unwrap();
+            assert_eq!(config.config_url, "file:///tmp/remote_config_url.yaml");
+            let expected = raw.replacen(&format!(" {old}\t="), &format!(" {new}\t="), 1);
+            assert_eq!(fs::read_to_string(&path).unwrap(), expected);
+            let metadata = fs::metadata(&path).unwrap();
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+            load_config(path.to_str().unwrap()).unwrap();
+            assert_eq!(fs::metadata(&path).unwrap().ino(), metadata.ino());
+            assert_eq!(fs::read_to_string(&path).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn current_invalid_and_conflicting_configs_are_not_rewritten() {
+        for (raw, valid) in [
+            (
+                "config_url='file:///tmp/source.yaml' # remote_config_url\n",
+                true,
+            ),
+            ("remote_config_url = [", false),
+            ("remote_config_url=123\n", false),
+            (
+                "remote_config_url='file:///tmp/source.yaml'\nunknown=1\n",
+                false,
+            ),
+            (
+                "remote_config_url='file:///tmp/old.yaml'\nconfig_url='file:///tmp/new.yaml'\n",
+                false,
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("mihoto.toml");
+            fs::write(&path, raw).unwrap();
+            let metadata = fs::metadata(&path).unwrap();
+            assert_eq!(load_config(path.to_str().unwrap()).is_ok(), valid);
+            assert_eq!(fs::read_to_string(&path).unwrap(), raw);
+            assert_eq!(fs::metadata(&path).unwrap().ino(), metadata.ino());
+        }
+    }
+
+    #[test]
+    fn migration_updates_the_target_of_a_config_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("actual.toml");
+        let link = dir.path().join("mihoto.toml");
+        fs::write(&target, "remote_config_url='file:///tmp/source.yaml'\n").unwrap();
+        symlink("actual.toml", &link).unwrap();
+        load_config(link.to_str().unwrap()).unwrap();
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read_to_string(target).unwrap(),
+            "config_url='file:///tmp/source.yaml'\n"
+        );
+    }
 
     #[test]
     fn config_is_private_and_missing_parse_does_not_create_it() {

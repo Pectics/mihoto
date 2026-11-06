@@ -173,8 +173,10 @@ subscription. If you change `ui`, run `sudo mihoto update --ui` to download the
 selected dashboard assets.
 
 `config_url` accepts HTTP(S) subscriptions and local file URLs. The former name
-`remote_config_url` remains accepted for existing configurations; newly written
-configuration uses `config_url`. Use one name per file.
+`remote_config_url` is automatically renamed when `init`, `update`, or `apply`
+loads an existing configuration. Migration preserves comments, formatting, and
+other settings, and writes the file atomically with private permissions. Read-only
+commands leave the file untouched. Use one name per file; conflicting names are rejected.
 
 ### Local configuration files
 

@@ -159,8 +159,9 @@ sudo mihoto apply
 如果修改了 `config_url`，运行 `sudo mihoto update` 获取新订阅。
 如果修改了 `ui`，运行 `sudo mihoto update --ui` 下载所选面板的资源。
 
-`config_url` 同时支持 HTTP(S) 订阅和本地文件 URL。旧字段名 `remote_config_url` 仍可读取，
-新建或保存配置时使用 `config_url`；同一文件只填写其中一个字段。
+`config_url` 同时支持 HTTP(S) 订阅和本地文件 URL。`init`、`update`、`apply` 等命令读取旧配置时，
+会自动将 `remote_config_url` 重命名为 `config_url`，保留注释、排版和其他设置，
+并以私有权限原子写入。只读命令不修改配置；同一文件同时填写新旧字段会报错。
 
 ### 本地配置文件
 
