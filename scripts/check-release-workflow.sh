@@ -32,9 +32,9 @@ for required in \
 	'SHA256SUMS' \
 	'attest-build-provenance' \
 	'libgcc-s1-arm64-cross' \
-	'audit-acceptance' \
-	'docs/audits/v1.0.0.md' \
-	'needs: [validate, quality, assemble, attest, audit-acceptance]' \
+	'host-acceptance' \
+	'uses: ./.github/workflows/real-host.yml' \
+	'needs: [validate, quality, assemble, attest, host-acceptance]' \
 	"github.event_name == 'push'" \
 	'github.event.inputs.tag' \
 	'--repo "$REPOSITORY"' \
@@ -43,13 +43,9 @@ for required in \
 	grep -Fq -- "$required" "$workflow"
 done
 
-if grep -Fq 'runs-on: [self-hosted' "$workflow"; then
-	echo 'release publication must not wait forever on unregistered runners' >&2
-	exit 1
-fi
-
 for required in \
 	'workflow_dispatch:' \
+	'workflow_call:' \
 	'runs-on: [self-hosted, linux, systemd, tun, x64]' \
 	'runs-on: [self-hosted, linux, systemd, tun, arm64]' \
 	'scripts/test-systemd-integration.sh' \

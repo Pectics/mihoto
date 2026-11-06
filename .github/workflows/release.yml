@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing v1 release tag to publish
+        description: Existing release tag to publish
         required: true
         type: string
   push:
@@ -76,7 +76,7 @@ jobs:
           cargo test --all-targets --no-default-features
           scripts/check-system-scope.sh
           scripts/check-release-workflow.sh
-          scripts/check-v1-contract.sh
+          scripts/check-product-contract.sh
 
   build:
     name: Build ${{ matrix.target }}
@@ -197,29 +197,16 @@ jobs:
         with:
           subject-path: release-artifacts/*
 
-  audit-acceptance:
-    name: Verify recorded host acceptance and release decision
+  host-acceptance:
+    name: Verify candidate on real systemd and TUN hosts
     needs: [validate, quality]
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          ref: ${{ needs.validate.outputs.tag }}
-      - name: Require the versioned audit decision
-        env:
-          VERSION: ${{ needs.validate.outputs.version }}
-        run: |
-          set -eu
-          audit="docs/audits/v${VERSION}.md"
-          test -f docs/audits/v1.0.0.md
-          test -f "$audit"
-          grep -Fq '67c9f1b5739340fec9aa12c5bb7e1a1c5b9f519c' "$audit"
-          grep -Fq 'accepted the post-evidence RED/GREEN remediation' "$audit"
-          grep -Fq 'Required from the tag workflow' "$audit"
+    uses: ./.github/workflows/real-host.yml
+    with:
+      ref: ${{ needs.validate.outputs.tag }}
 
   release:
     name: Publish verified release
-    needs: [validate, quality, assemble, attest, audit-acceptance]
+    needs: [validate, quality, assemble, attest, host-acceptance]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

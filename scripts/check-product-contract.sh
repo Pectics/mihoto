@@ -3,15 +3,8 @@ set -eu
 
 cd "$(dirname "$0")/.."
 
-contract=docs/v1-contract.md
-release_notes=docs/releases/v1.0.0.md
-audit_record=docs/audits/v1.0.0.md
-
-test -f "$contract"
-test -f "$release_notes"
-test -f "$audit_record"
-grep -Fq 'version = "0.1.0"' Cargo.toml
-grep -Fq 'version = "0.1.0"' Cargo.lock
+# Public behavior is checked against the maintained README and executable contracts.
+cargo metadata --locked --no-deps --format-version 1 >/dev/null
 
 for required in \
 	'/etc/mihoto.toml' \
@@ -31,7 +24,7 @@ for required in \
 	'SHA256SUMS' \
 	'attestation' \
 	'--version <semver>'; do
-	grep -Fqi -- "$required" "$contract" README.md "$release_notes"
+	grep -Fqi -- "$required" README.md
 done
 
 grep -Fq 'command_requires_root' src/cli/policy.rs
