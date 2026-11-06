@@ -138,13 +138,13 @@ mod tests {
             parse_config(path.to_str().unwrap())
                 .unwrap_err()
                 .to_string(),
-            "`remote_config_url` undefined"
+            "`config_url` undefined"
         );
 
-        config.remote_config_url = "https://example.com/config.yaml".to_string();
+        config.config_url = "https://example.com/config.yaml".to_string();
         write_config(&config, &path).unwrap();
         let parsed = parse_config(path.to_str().unwrap()).unwrap();
-        assert_eq!(parsed.remote_config_url, config.remote_config_url);
+        assert_eq!(parsed.config_url, config.config_url);
     }
 
     #[test]

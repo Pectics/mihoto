@@ -85,7 +85,7 @@ processes, or terminal output.
 
 3. **Init flow**: `mihoto init` is the main onboarding path
    - `bootstrap_config()` creates the default TOML config if missing
-   - Interactive runs prompt for `remote_config_url` and continue in the same command
+   - Interactive runs prompt for `config_url` and continue in the same command
    - `--yes` is for non-interactive use and expects required fields to already be present
    - Stage reports make repeat runs safe and easier to follow
 
@@ -104,7 +104,7 @@ processes, or terminal output.
 ### Configuration flow
 
 1. `mihoto init` creates `/etc/mihoto.toml` if it does not exist
-2. Interactive init prompts for the remote subscription URL when `remote_config_url` is empty
+2. Interactive init prompts for the remote subscription URL when `config_url` is empty
 3. Remote YAML config is downloaded from the subscription URL
 4. Local TOML overrides are merged into the final `config.yaml`
 5. The system service is written, enabled, and started

@@ -56,7 +56,7 @@ install -m 0755 "$mihoto_source" /usr/local/bin/mihoto
 install -m 0755 "$mihomo_source" /usr/local/bin/mihomo
 install -d -m 0750 /etc/mihomo/ui
 printf '%s\n' \
-	'remote_config_url = "http://127.0.0.1:9/not-used"' \
+	'config_url = "http://127.0.0.1:9/not-used"' \
 	'auto_update_interval = 0' \
 	'' \
 	'[mihomo_config]' \

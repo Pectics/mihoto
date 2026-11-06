@@ -49,7 +49,7 @@ printf '%s\n' \
 	> /usr/local/bin/mihomo
 chmod 0755 /usr/local/bin/mihomo
 printf '%s\n' \
-	'remote_config_url = "http://127.0.0.1:9/not-used"' \
+	'config_url = "http://127.0.0.1:9/not-used"' \
 	'auto_update_interval = 1' \
 	> /etc/mihoto.toml
 chmod 0600 /etc/mihoto.toml

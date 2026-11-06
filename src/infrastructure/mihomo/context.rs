@@ -46,7 +46,7 @@ mod tests {
     fn derived_paths_follow_the_validated_configuration() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = Config {
-            remote_config_url: "https://example.com/config.yaml".to_string(),
+            config_url: "https://example.com/config.yaml".to_string(),
             mihomo_binary_path: dir.path().join("bin/mihomo").to_string_lossy().into_owned(),
             mihomo_config_root: dir.path().join("etc/mihomo").to_string_lossy().into_owned(),
             ..Config::default()

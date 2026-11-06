@@ -332,7 +332,7 @@ impl Mihoto {
         let staged = NamedTempFile::new_in(&self.mihomo_target_config_root)?;
         fetch_config(
             client,
-            &self.config.remote_config_url,
+            &self.config.config_url,
             staged.path(),
             &self.config.mihoto_user_agent,
         )

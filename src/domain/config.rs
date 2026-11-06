@@ -20,7 +20,8 @@ pub enum MihomoChannel {
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// Subscription source: an HTTP(S) URL or a local file URL with an absolute path.
-    pub remote_config_url: String,
+    #[serde(alias = "remote_config_url")]
+    pub config_url: String,
     #[serde(default = "default_ui", skip_serializing_if = "Option::is_none")]
     pub ui: Option<Ui>,
     pub mihomo_channel: MihomoChannel,
@@ -44,7 +45,7 @@ impl Default for Config {
             remote_mihomo_binary_url: None,
             mihomo_channel: MihomoChannel::default(),
             mihomo_arch: None,
-            remote_config_url: String::from(""),
+            config_url: String::from(""),
             mihoto_binary_path: String::from("/usr/local/bin/mihoto"),
             mihomo_binary_path: String::from("/usr/local/bin/mihomo"),
             mihomo_config_root: String::from("/etc/mihomo"),
@@ -156,7 +157,7 @@ pub fn validate_manager_config_path(path: &Path) -> Result<()> {
 /// Validate that required config fields are non-empty.
 pub fn validate_config(config: &Config) -> Result<()> {
     let required_fields = [
-        ("remote_config_url", &config.remote_config_url),
+        ("config_url", &config.config_url),
         ("mihomo_binary_path", &config.mihomo_binary_path),
         ("mihomo_config_root", &config.mihomo_config_root),
         ("mihoto_binary_path", &config.mihoto_binary_path),
@@ -283,6 +284,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn config_url_reads_legacy_name_and_writes_only_the_canonical_name() {
+        for url in [
+            "https://example.com/config.yaml",
+            "file:///etc/mihoto-nodes.yaml",
+        ] {
+            for key in ["config_url", "remote_config_url"] {
+                let config: Config = toml::from_str(&format!("{key} = {url:?}")).unwrap();
+                assert_eq!(config.config_url, url);
+                validate_config(&config).unwrap();
+                let serialized = toml::to_string(&config).unwrap();
+                let value: toml::Value = toml::from_str(&serialized).unwrap();
+                assert_eq!(value["config_url"].as_str(), Some(url));
+                assert!(value.get("remote_config_url").is_none());
+            }
+        }
+        let error = toml::from_str::<Config>(
+            "config_url = 'file:///etc/new.yaml'\nremote_config_url = 'file:///etc/old.yaml'\n",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("duplicate field `config_url`"));
+    }
+
+    #[test]
     fn system_defaults_and_validation() {
         let config = Config::default();
         assert_eq!(config.mihoto_binary_path, "/usr/local/bin/mihoto");
@@ -349,14 +373,14 @@ mod tests {
     #[test]
     fn every_required_field_and_path_constraint_is_validated() {
         let valid = Config {
-            remote_config_url: "https://example.com/config.yaml".to_string(),
+            config_url: "https://example.com/config.yaml".to_string(),
             ..Config::default()
         };
         assert!(validate_config(&valid).is_ok());
 
         let required_cases: [(&str, fn(&mut Config)); 4] = [
-            ("remote_config_url", |config: &mut Config| {
-                config.remote_config_url.clear()
+            ("config_url", |config: &mut Config| {
+                config.config_url.clear()
             }),
             ("mihomo_binary_path", |config: &mut Config| {
                 config.mihomo_binary_path.clear()

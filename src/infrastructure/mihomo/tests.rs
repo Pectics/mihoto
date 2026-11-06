@@ -117,7 +117,7 @@ async fn invalid_remote_config_does_not_replace_existing_config() {
     fs::write(&config_path, original).unwrap();
 
     let config = Config {
-        remote_config_url: format!("{}/config.yaml", server.uri()),
+        config_url: format!("{}/config.yaml", server.uri()),
         mihomo_config_root: dir.path().display().to_string(),
         ..Config::default()
     };
@@ -144,7 +144,7 @@ async fn semantically_invalid_remote_config_does_not_replace_existing_config() {
     let mihomo_binary = fake_mihomo(dir.path(), 1);
 
     let config = Config {
-        remote_config_url: format!("{}/config.yaml", server.uri()),
+        config_url: format!("{}/config.yaml", server.uri()),
         mihomo_binary_path: mihomo_binary.display().to_string(),
         mihomo_config_root: dir.path().display().to_string(),
         ..Config::default()
@@ -178,7 +178,7 @@ async fn unhealthy_restart_restores_previous_config() {
     let mihomo_binary = fake_mihomo(dir.path(), 0);
     let systemctl = fake_unhealthy_then_recovered_systemctl(dir.path());
     let config = Config {
-        remote_config_url: format!("{}/config.yaml", server.uri()),
+        config_url: format!("{}/config.yaml", server.uri()),
         mihomo_binary_path: mihomo_binary.display().to_string(),
         mihomo_config_root: dir.path().display().to_string(),
         ..Config::default()
@@ -219,7 +219,7 @@ async fn healthy_restart_commits_updated_config() {
     let mihomo_binary = fake_mihomo(dir.path(), 0);
     let systemctl = fake_systemctl(dir.path(), 0);
     let config = Config {
-        remote_config_url: format!("{}/config.yaml", server.uri()),
+        config_url: format!("{}/config.yaml", server.uri()),
         mihomo_binary_path: mihomo_binary.display().to_string(),
         mihomo_config_root: dir.path().display().to_string(),
         ..Config::default()
@@ -263,7 +263,7 @@ async fn restart_counter_growth_rolls_back_even_while_service_is_active() {
     let mihomo_binary = fake_mihomo(dir.path(), 0);
     let systemctl = fake_restart_loop_then_recovered_systemctl(dir.path());
     let config = Config {
-        remote_config_url: format!("{}/config.yaml", server.uri()),
+        config_url: format!("{}/config.yaml", server.uri()),
         mihomo_binary_path: mihomo_binary.display().to_string(),
         mihomo_config_root: dir.path().display().to_string(),
         ..Config::default()
@@ -298,7 +298,7 @@ async fn updated_remote_config_is_private() {
     let dir = tempfile::tempdir().unwrap();
     let mihomo_binary = fake_mihomo(dir.path(), 0);
     let config = Config {
-        remote_config_url: format!("{}/config.yaml", server.uri()),
+        config_url: format!("{}/config.yaml", server.uri()),
         mihomo_binary_path: mihomo_binary.display().to_string(),
         mihomo_config_root: dir.path().display().to_string(),
         ..Config::default()
@@ -321,7 +321,7 @@ async fn local_subscription_init_and_refresh_preserve_the_source_and_last_workin
     fs::write(&source, original).unwrap();
     let binary = fake_mihomo(dir.path(), 0);
     let mihoto = Mihoto::from_config(Config {
-        remote_config_url: reqwest::Url::from_file_path(&source).unwrap().to_string(),
+        config_url: reqwest::Url::from_file_path(&source).unwrap().to_string(),
         mihomo_binary_path: binary.display().to_string(),
         mihomo_config_root: dir.path().display().to_string(),
         ..Config::default()

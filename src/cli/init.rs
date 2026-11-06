@@ -26,10 +26,10 @@ pub(crate) fn bootstrap_config(config_path: &str, yes: bool) -> Result<Config> {
     let mut config =
         load_config(config_path)?.expect("config file must exist after write_default_if_missing");
 
-    if config.remote_config_url.is_empty() {
+    if config.config_url.is_empty() {
         if yes {
             bail!(
-                "`remote_config_url` is not set - edit `{config_path}` or run `mihoto init` interactively"
+                "`config_url` is not set - edit `{config_path}` or run `mihoto init` interactively"
             );
         }
         if just_created {
@@ -40,7 +40,7 @@ pub(crate) fn bootstrap_config(config_path: &str, yes: bool) -> Result<Config> {
             );
         }
         println!("{} Enter your subscription URL:", "mihoto:".yellow());
-        config.remote_config_url = prompt_subscription_url()?;
+        config.config_url = prompt_subscription_url()?;
         write_config(&config, Path::new(config_path))?;
         println!("{} Saved", "mihoto:".green());
     }
@@ -57,13 +57,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested/mihoto.toml");
         let error = bootstrap_config(path.to_str().unwrap(), true).unwrap_err();
-        assert!(error.to_string().contains("`remote_config_url` is not set"));
+        assert!(error.to_string().contains("`config_url` is not set"));
         assert!(path.exists());
         assert_eq!(
             load_config(path.to_str().unwrap())
                 .unwrap()
                 .unwrap()
-                .remote_config_url,
+                .config_url,
             ""
         );
     }
@@ -73,13 +73,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mihoto.toml");
         let config = Config {
-            remote_config_url: "https://example.com/subscription".to_string(),
+            config_url: "https://example.com/subscription".to_string(),
             ..Config::default()
         };
         write_config(&config, &path).unwrap();
         let original = fs::read_to_string(&path).unwrap();
         let loaded = bootstrap_config(path.to_str().unwrap(), true).unwrap();
-        assert_eq!(loaded.remote_config_url, config.remote_config_url);
+        assert_eq!(loaded.config_url, config.config_url);
         assert_eq!(fs::read_to_string(path).unwrap(), original);
     }
 

@@ -137,7 +137,7 @@ sudo install -m 755 target/release/mihoto /usr/local/bin/mihoto
 下面是一个最小配置示例。请替换为自己的订阅地址；省略的设置使用 Mihoto 默认值。
 
 ```toml
-remote_config_url = "https://example.com/your-mihomo-subscription.yaml"
+config_url = "https://example.com/your-mihomo-subscription.yaml"
 ui = "metacubexd"
 mihomo_channel = "stable"
 auto_update_interval = 12
@@ -156,15 +156,18 @@ external_controller = "127.0.0.1:9090"
 sudo mihoto apply
 ```
 
-如果修改了 `remote_config_url`，运行 `sudo mihoto update` 获取新订阅。
+如果修改了 `config_url`，运行 `sudo mihoto update` 获取新订阅。
 如果修改了 `ui`，运行 `sudo mihoto update --ui` 下载所选面板的资源。
+
+`config_url` 同时支持 HTTP(S) 订阅和本地文件 URL。旧字段名 `remote_config_url` 仍可读取，
+新建或保存配置时使用 `config_url`；同一文件只填写其中一个字段。
 
 ### 本地配置文件
 
-自行维护少量节点时，可以让现有的 `remote_config_url` 字段指向本地 Mihomo YAML 文件：
+自行维护少量节点时，可以让现有的 `config_url` 字段指向本地 Mihomo YAML 文件：
 
 ```toml
-remote_config_url = "file:///etc/mihoto-nodes.yaml"
+config_url = "file:///etc/mihoto-nodes.yaml"
 ```
 
 将源文件与生成的 `/etc/mihomo/config.yaml` 分开保存。`mihoto init` 在首次初始化时读取它；
@@ -284,7 +287,7 @@ gh attestation verify mihoto-v0.1.0-x86_64-unknown-linux-gnu.tar.gz \
 <details>
 <summary><strong>可以不经过交互提示直接初始化吗？</strong></summary>
 
-可以。提前准备好 `/etc/mihoto.toml` 并填写有效的 `remote_config_url`，
+可以。提前准备好 `/etc/mihoto.toml` 并填写有效的 `config_url`，
 然后运行 `sudo mihoto init --yes`。该选项仅跳过交互提示，不会补齐缺失配置。
 交互式运行 `sudo mihoto init` 时，会按需创建默认配置文件并询问订阅地址。
 

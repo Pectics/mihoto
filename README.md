@@ -149,7 +149,7 @@ The following is a minimal example. Replace the subscription URL with your own;
 omitted settings use Mihoto's defaults.
 
 ```toml
-remote_config_url = "https://example.com/your-mihomo-subscription.yaml"
+config_url = "https://example.com/your-mihomo-subscription.yaml"
 ui = "metacubexd"
 mihomo_channel = "stable"
 auto_update_interval = 12
@@ -168,17 +168,21 @@ After editing:
 sudo mihoto apply
 ```
 
-If you change `remote_config_url`, run `sudo mihoto update` to fetch the new
+If you change `config_url`, run `sudo mihoto update` to fetch the new
 subscription. If you change `ui`, run `sudo mihoto update --ui` to download the
 selected dashboard assets.
 
+`config_url` accepts HTTP(S) subscriptions and local file URLs. The former name
+`remote_config_url` remains accepted for existing configurations; newly written
+configuration uses `config_url`. Use one name per file.
+
 ### Local configuration files
 
-For locally maintained nodes, point the existing `remote_config_url` field at a
+For locally maintained nodes, point the existing `config_url` field at a
 local Mihomo YAML file:
 
 ```toml
-remote_config_url = "file:///etc/mihoto-nodes.yaml"
+config_url = "file:///etc/mihoto-nodes.yaml"
 ```
 
 Keep this source separate from the generated `/etc/mihomo/config.yaml`.
@@ -309,7 +313,7 @@ rather than restart on partial state. Inspect `mihoto log` for service details.
 <details>
 <summary><strong>Can I initialize Mihoto without interactive prompts?</strong></summary>
 
-Yes. Prepare `/etc/mihoto.toml` with a valid `remote_config_url`, then run
+Yes. Prepare `/etc/mihoto.toml` with a valid `config_url`, then run
 `sudo mihoto init --yes`. The flag suppresses prompting; it does not supply missing
 configuration. Interactive `sudo mihoto init` creates the default file and asks
 for the URL when needed.
