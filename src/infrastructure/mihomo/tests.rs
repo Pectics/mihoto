@@ -333,25 +333,6 @@ fn semantically_invalid_override_does_not_replace_existing_config() {
 }
 
 #[tokio::test]
-async fn invalid_gzip_does_not_leave_a_binary() {
-    use std::io::Write;
-
-    let dir = tempfile::tempdir().unwrap();
-    let target = dir.path().join("mihomo");
-    let config = Config {
-        mihomo_binary_path: target.display().to_string(),
-        mihomo_config_root: dir.path().join("config").display().to_string(),
-        ..Config::default()
-    };
-    let mihoto = Mihoto::from_config(config);
-    let mut staged = NamedTempFile::new().unwrap();
-    staged.write_all(b"not a gzip stream").unwrap();
-
-    assert!(mihoto.install_binary(staged).await.is_err());
-    assert!(!target.exists());
-}
-
-#[tokio::test]
 async fn unchanged_service_has_its_permissions_repaired() {
     let dir = tempfile::tempdir().unwrap();
     let service_path = dir.path().join("mihomo.service");

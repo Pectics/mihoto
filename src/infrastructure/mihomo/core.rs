@@ -383,6 +383,28 @@ mod tests {
         let binary = executable(dir.path(), "exit 9");
         assert!(installed_mihomo_version(&binary).is_err());
         assert!(installed_mihomo_version(dir.path().join("missing").to_str().unwrap()).is_err());
+
+        let mut busy = NamedTempFile::new_in(dir.path()).unwrap();
+        busy.write_all(b"#!/bin/sh\necho 'Mihomo Meta v2.0.0'\n")
+            .unwrap();
+        busy.as_file()
+            .set_permissions(fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let error = installed_mihomo_version(busy.path().to_str().unwrap()).unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .raw_os_error(),
+            Some(libc::ETXTBSY)
+        );
+        let executable = busy.into_temp_path();
+        assert_eq!(
+            installed_mihomo_version(executable.to_str().unwrap())
+                .unwrap()
+                .as_deref(),
+            Some("v2.0.0")
+        );
     }
 
     #[tokio::test]
@@ -445,5 +467,249 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("Run `mihoto init` first"));
+    }
+
+    fn archive(contents: &[u8]) -> NamedTempFile {
+        let mut encoder = GzEncoder::new(NamedTempFile::new().unwrap(), Compression::default());
+        encoder.write_all(contents).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn candidate(validation_exit: i32) -> Vec<u8> {
+        format!(
+            "#!/bin/sh\n# new core\ncase \"$1\" in\n-v) echo 'Mihomo Meta v2.0.0' ;;\n-t) test \"$2\" = -d && test \"$4\" = -f && test -f \"$5\" || exit 8; exit {validation_exit} ;;\n*) exit 9 ;;\nesac\n"
+        )
+        .into_bytes()
+    }
+
+    fn installation(dir: &Path, existing: bool) -> Mihoto {
+        let config = Config {
+            mihomo_binary_path: dir.join("mihomo").display().to_string(),
+            mihomo_config_root: dir.display().to_string(),
+            ..Config::default()
+        };
+        if existing {
+            executable(dir, "# old core\necho 'Mihomo Meta v1.0.0'");
+            fs::set_permissions(dir.join("mihomo"), fs::Permissions::from_mode(0o751)).unwrap();
+        }
+        fs::write(dir.join("config.yaml"), "rules: []\n").unwrap();
+        Mihoto::from_config(config)
+    }
+
+    // State lives in each case's temp directory; no PATH or process-wide environment changes.
+    fn service(dir: &Path, active: bool, failure: &str) -> std::path::PathBuf {
+        let program = dir.join("systemctl");
+        fs::write(
+            &program,
+            format!(
+                r#"#!/bin/sh
+cd '{}'
+echo "$*" >> calls
+count=$(cat restarts 2>/dev/null || echo 0)
+new=false
+grep -q 'new core' mihomo 2>/dev/null && new=true
+case "$1" in
+is-active)
+    if [ "$count" = 0 ]; then {}; fi
+    if $new && [ '{}' = health ]; then exit 3; fi
+    exit 0 ;;
+show)
+    if $new && [ '{}' = loop ] && [ "$count" -gt 0 ]; then echo 1; else echo 0; fi ;;
+stop)
+    if [ '{}' = replace ]; then
+        if [ -f mihomo ]; then rm mihomo; mkdir mihomo; fi
+        exit 0
+    fi
+    [ '{}' != stop ] ;;
+restart)
+    echo $((count + 1)) > restarts
+    if $new; then
+        case '{}' in restart|recovery) exit 1 ;; esac
+    fi ;;
+reset-failed)
+    [ '{}' != recovery ] ;;
+*) exit 9 ;;
+esac
+"#,
+                dir.display(),
+                if active { "exit 0" } else { "exit 3" },
+                failure,
+                failure,
+                failure,
+                failure,
+                failure,
+                failure
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        program
+    }
+
+    #[tokio::test]
+    async fn preflight_rejects_bad_archives_executables_versions_and_configs_without_mutation() {
+        for (contents, compressed, has_config, expected) in [
+            (b"invalid gzip".to_vec(), false, true, ""),
+            (b"not executable".to_vec(), true, true, "failed to run"),
+            (b"#!/bin/sh\nexit 4\n".to_vec(), true, true, "exited with"),
+            (
+                b"#!/bin/sh\necho unknown\n".to_vec(),
+                true,
+                true,
+                "did not report a version",
+            ),
+            (candidate(5), true, true, "Mihomo rejected staged config"),
+            (candidate(0), true, false, "Mihomo rejected staged config"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mihoto = installation(dir.path(), true);
+            if !has_config {
+                fs::remove_file(&mihoto.mihomo_target_config_path).unwrap();
+            }
+            let original = fs::read(&mihoto.mihomo_target_binary_path).unwrap();
+            let program = service(dir.path(), true, "");
+            let mut download = if compressed {
+                archive(&contents)
+            } else {
+                NamedTempFile::new().unwrap()
+            };
+            if !compressed {
+                download.write_all(&contents).unwrap();
+            }
+            let error = mihoto
+                .install_binary_with_program(download, &program, Duration::ZERO, true)
+                .await
+                .unwrap_err();
+            assert!(format!("{error:#}").contains(expected), "{error:#}");
+            assert_eq!(
+                fs::read(&mihoto.mihomo_target_binary_path).unwrap(),
+                original
+            );
+            assert!(!dir.path().join("calls").exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn successful_install_respects_init_and_update_service_states() {
+        for (existing, active, activate, restarted) in [
+            (false, false, false, false),
+            (true, false, false, false),
+            (true, true, false, true),
+            (true, false, true, true),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mihoto = installation(dir.path(), existing);
+            let program = service(dir.path(), active, "");
+            // A fresh init can stage a binary before its YAML exists.
+            if !existing {
+                fs::remove_file(&mihoto.mihomo_target_config_path).unwrap();
+            }
+            let bytes = candidate(0);
+            mihoto
+                .install_binary_with_program(archive(&bytes), &program, Duration::ZERO, activate)
+                .await
+                .unwrap();
+            assert_eq!(fs::read(&mihoto.mihomo_target_binary_path).unwrap(), bytes);
+            assert_eq!(
+                fs::metadata(&mihoto.mihomo_target_binary_path)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755
+            );
+            let calls = fs::read_to_string(dir.path().join("calls")).unwrap_or_default();
+            assert_eq!(calls.contains("restart mihomo.service"), restarted);
+            assert!(!calls.contains("reset-failed"));
+        }
+    }
+
+    #[tokio::test]
+    async fn installation_failures_restore_binary_permissions_and_prior_service_state() {
+        for (active, failure, recovery_failed) in [
+            (true, "restart", false),
+            (true, "health", false),
+            (true, "loop", false),
+            (false, "restart", false),
+            (true, "stop", false),
+            (false, "stop", true),
+            (true, "recovery", true),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mihoto = installation(dir.path(), true);
+            let original = fs::read(&mihoto.mihomo_target_binary_path).unwrap();
+            let program = service(dir.path(), active, failure);
+            let error = mihoto
+                .install_binary_with_program(archive(&candidate(0)), &program, Duration::ZERO, true)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.to_string().contains("recovery also failed"),
+                recovery_failed,
+                "{error:#}"
+            );
+            assert_eq!(
+                fs::read(&mihoto.mihomo_target_binary_path).unwrap(),
+                original
+            );
+            assert_eq!(
+                fs::metadata(&mihoto.mihomo_target_binary_path)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o751
+            );
+            let calls = fs::read_to_string(dir.path().join("calls")).unwrap();
+            assert_eq!(calls.contains("reset-failed mihomo.service"), active);
+            if !active {
+                assert_eq!(
+                    calls.matches("restart mihomo.service").count(),
+                    usize::from(failure != "stop")
+                );
+                assert!(calls.ends_with("stop mihomo.service\n"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_binary_restore_retains_old_core_for_manual_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let mihoto = installation(dir.path(), true);
+        let original = fs::read(&mihoto.mihomo_target_binary_path).unwrap();
+        let program = service(dir.path(), true, "replace");
+        let error = mihoto
+            .install_binary_with_program(archive(&candidate(0)), &program, Duration::ZERO, true)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("backup retained at"),
+            "{error:#}"
+        );
+        let backups: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".tmp"))
+            .collect();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(fs::read(backups[0].path()).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn restoring_without_a_previous_binary_cleans_only_the_new_binary() {
+        for exists in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mihoto = installation(dir.path(), exists);
+            let program = service(dir.path(), false, "");
+            mihoto
+                .restore_binary(None, &program, Duration::ZERO, false)
+                .await
+                .unwrap();
+            assert!(!Path::new(&mihoto.mihomo_target_binary_path).exists());
+            assert_eq!(
+                fs::read_to_string(&mihoto.mihomo_target_config_path).unwrap(),
+                "rules: []\n"
+            );
+        }
     }
 }
