@@ -171,6 +171,24 @@ If you change `remote_config_url`, run `sudo mihoto update` to fetch the new
 subscription. If you change `ui`, run `sudo mihoto update --ui` to download the
 selected dashboard assets.
 
+### Local configuration files
+
+For locally maintained nodes, point the existing `remote_config_url` field at a
+local Mihomo YAML file:
+
+```toml
+remote_config_url = "file:///etc/mihoto-nodes.yaml"
+```
+
+Keep this source separate from the generated `/etc/mihomo/config.yaml`.
+`mihoto init` reads it during initial setup; after editing it, run
+`sudo mihoto update` to read it again, merge TOML overrides, validate, and apply.
+The source file is left unchanged. Scheduled updates also read the same file.
+
+File URLs require an absolute path. `file:/etc/mihoto-nodes.yaml` and
+`file://localhost/etc/mihoto-nodes.yaml` are also supported. Encode spaces as
+`%20` and `#` as `%23`; relative paths, other hosts, queries, and fragments are rejected.
+
 ### How settings reach Mihomo
 
 ```mermaid

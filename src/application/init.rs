@@ -56,7 +56,7 @@ where
     report
         .run(
             "remote config",
-            Some("downloading and merging remote config"),
+            Some("fetching and merging subscription config"),
             || operations.ensure_remote_config(force),
         )
         .await;

@@ -313,6 +313,48 @@ async fn updated_remote_config_is_private() {
     assert_eq!(mode, 0o600);
 }
 
+#[tokio::test]
+async fn local_subscription_init_and_refresh_preserve_the_source_and_last_working_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.yaml");
+    let original = "mixed-port: 1\ntun:\n  enable: true\nrules:\n  - MATCH,DIRECT\n";
+    fs::write(&source, original).unwrap();
+    let binary = fake_mihomo(dir.path(), 0);
+    let mihoto = Mihoto::from_config(Config {
+        remote_config_url: reqwest::Url::from_file_path(&source).unwrap().to_string(),
+        mihomo_binary_path: binary.display().to_string(),
+        mihomo_config_root: dir.path().display().to_string(),
+        ..Config::default()
+    });
+    let client = Client::new();
+    mihoto.ensure_remote_config(&client, false).await.unwrap();
+    let effective = || fs::read_to_string(&mihoto.mihomo_target_config_path).unwrap();
+    let value: serde_yaml::Value = serde_yaml::from_str(&effective()).unwrap();
+    assert_eq!(value["mixed-port"], 7890);
+    assert_eq!(value["tun"]["enable"], true);
+    assert_eq!(fs::read_to_string(&source).unwrap(), original);
+
+    let updated = original.replace("enable: true", "enable: false");
+    // Base64 input uses the same decoding path as HTTP subscriptions.
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let encoded = STANDARD.encode(&updated);
+    fs::write(&source, &encoded).unwrap();
+    mihoto.update_config(&client).await.unwrap();
+    let working = effective();
+    let value: serde_yaml::Value = serde_yaml::from_str(&working).unwrap();
+    assert_eq!(value["tun"]["enable"], false);
+    assert_eq!(value["mixed-port"], 7890);
+    assert_eq!(fs::read_to_string(&source).unwrap(), encoded);
+
+    fs::write(&source, "port: [").unwrap();
+    assert!(mihoto.update_config(&client).await.is_err());
+    assert_eq!(effective(), working);
+    assert_eq!(fs::read_to_string(&source).unwrap(), "port: [");
+    fs::remove_file(source).unwrap();
+    assert!(mihoto.update_config(&client).await.is_err());
+    assert_eq!(effective(), working);
+}
+
 #[test]
 fn semantically_invalid_override_does_not_replace_existing_config() {
     let dir = tempfile::tempdir().unwrap();

@@ -158,6 +158,22 @@ sudo mihoto apply
 如果修改了 `remote_config_url`，运行 `sudo mihoto update` 获取新订阅。
 如果修改了 `ui`，运行 `sudo mihoto update --ui` 下载所选面板的资源。
 
+### 本地配置文件
+
+自行维护少量节点时，可以让现有的 `remote_config_url` 字段指向本地 Mihomo YAML 文件：
+
+```toml
+remote_config_url = "file:///etc/mihoto-nodes.yaml"
+```
+
+将源文件与生成的 `/etc/mihomo/config.yaml` 分开保存。`mihoto init` 在首次初始化时读取它；
+以后编辑源文件后，运行 `sudo mihoto update`，重新读取并合并 TOML 覆盖设置，校验后应用。
+源文件保持原样，定时更新也会重新读取同一文件。
+
+文件 URL 使用绝对路径，也支持 `file:/etc/mihoto-nodes.yaml` 和
+`file://localhost/etc/mihoto-nodes.yaml`。路径中的空格编码为 `%20`，`#` 编码为 `%23`；
+相对路径、其他主机、query 和 fragment 会被拒绝。
+
 ### 配置如何应用到 Mihomo
 
 ```mermaid

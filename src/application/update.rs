@@ -21,7 +21,7 @@ where
 
     if options.all {
         report
-            .run("config", Some("refreshing remote config"), || {
+            .run("config", Some("refreshing subscription config"), || {
                 operations.update_config()
             })
             .await;
@@ -100,7 +100,7 @@ where
             .await;
     } else if options.config || (!options.core && !options.geodata && !options.ui) {
         report
-            .run("config", Some("refreshing remote config"), || {
+            .run("config", Some("refreshing subscription config"), || {
                 operations.update_config()
             })
             .await;

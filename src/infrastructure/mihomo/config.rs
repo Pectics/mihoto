@@ -1,5 +1,6 @@
+use crate::infrastructure::config_source::fetch_config;
 use crate::infrastructure::config_store::apply_mihomo_override;
-use crate::infrastructure::download::{download_file, DETAIL_PREFIX};
+use crate::infrastructure::download::DETAIL_PREFIX;
 use crate::infrastructure::filesystem::try_decode_base64_file_inplace;
 use crate::infrastructure::systemctl::Systemctl;
 
@@ -329,7 +330,7 @@ impl Mihoto {
         self.ensure_config_root_secure()?;
         let target = Path::new(&self.mihomo_target_config_path);
         let staged = NamedTempFile::new_in(&self.mihomo_target_config_root)?;
-        download_file(
+        fetch_config(
             client,
             &self.config.remote_config_url,
             staged.path(),
@@ -348,7 +349,7 @@ impl Mihoto {
         Ok(())
     }
 
-    /// Download remote config YAML and apply TOML overrides.
+    /// Fetch subscription YAML from HTTP(S) or a local file and apply TOML overrides.
     /// If the config file already exists and `force` is false, only re-applies overrides.
     pub async fn ensure_remote_config(&self, client: &Client, force: bool) -> Result<StageStatus> {
         let config_path = Path::new(&self.mihomo_target_config_path);

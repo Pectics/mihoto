@@ -19,6 +19,7 @@ pub enum MihomoChannel {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    /// Subscription source: an HTTP(S) URL or a local file URL with an absolute path.
     pub remote_config_url: String,
     #[serde(default = "default_ui", skip_serializing_if = "Option::is_none")]
     pub ui: Option<Ui>,

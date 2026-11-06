@@ -9,7 +9,7 @@ use dialoguer::Input;
 
 fn prompt_subscription_url() -> Result<String> {
     let url: String = Input::new()
-        .with_prompt("Remote subscription URL")
+        .with_prompt("Subscription URL (https:// or file:///absolute/path)")
         .validate_with(|value: &String| {
             if value.trim().is_empty() {
                 Err("URL cannot be empty")
@@ -39,7 +39,7 @@ pub(crate) fn bootstrap_config(config_path: &str, yes: bool) -> Result<Config> {
                 config_path.underline().yellow()
             );
         }
-        println!("{} Enter your remote subscription URL:", "mihoto:".yellow());
+        println!("{} Enter your subscription URL:", "mihoto:".yellow());
         config.remote_config_url = prompt_subscription_url()?;
         write_config(&config, Path::new(config_path))?;
         println!("{} Saved", "mihoto:".green());

@@ -1,4 +1,5 @@
 pub(crate) mod command_adapters;
+pub(crate) mod config_source;
 pub(crate) mod config_store;
 pub(crate) mod download;
 pub(crate) mod filesystem;
