@@ -34,6 +34,9 @@ pub(crate) async fn run() -> Result<()> {
 
     // Read-only commands deliberately do not load or create the manager configuration.
     match &args.command {
+        Some(Commands::Control) => {
+            anyhow::bail!("mihoto control is reserved for external-controller operations; not implemented yet");
+        }
         Some(Commands::Status) => {
             service::run(&SystemService, service::ServiceAction::Status)?;
             return Ok(());
@@ -115,6 +118,7 @@ pub(crate) async fn run() -> Result<()> {
     };
 
     match &args.command {
+        Some(Commands::Control) => unreachable!(),
         Some(Commands::Init { .. }) => unreachable!(),
         Some(Commands::Update {
             config,

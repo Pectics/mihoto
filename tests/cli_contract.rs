@@ -10,6 +10,7 @@ fn mihoto_help_exposes_only_system_commands() {
         .success()
         .stdout(predicate::str::contains("mihoto"))
         .stdout(predicate::str::contains("timer"))
+        .stdout(predicate::str::contains("control"))
         .stdout(predicate::str::contains("proxy").not())
         .stdout(predicate::str::contains("cron").not())
         .stdout(predicate::str::contains("setup").not())
@@ -121,4 +122,26 @@ fn timer_requires_an_explicit_subcommand() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("Usage"));
+}
+
+#[test]
+fn control_is_a_documented_placeholder_without_configuration_or_side_effects() {
+    Command::cargo_bin("mihoto")
+        .unwrap()
+        .args(["control", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("external-controller"));
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("missing.toml");
+    Command::cargo_bin("mihoto")
+        .unwrap()
+        .arg("--config")
+        .arg(&config)
+        .arg("control")
+        .env("PATH", dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not implemented yet"));
+    assert!(!config.exists());
 }

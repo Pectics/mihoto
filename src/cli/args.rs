@@ -38,6 +38,8 @@ pub enum Commands {
     },
     /// Apply configuration overrides
     Apply,
+    /// Control Mihomo through external-controller (not implemented yet)
+    Control,
     /// Start mihomo.service
     Start,
     /// Show mihomo.service status

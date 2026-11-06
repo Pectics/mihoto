@@ -4,6 +4,7 @@ pub(crate) fn command_requires_root(command: &Commands) -> bool {
     !matches!(
         command,
         Commands::Status
+            | Commands::Control
             | Commands::Log
             | Commands::Completions { .. }
             | Commands::Timer {
@@ -65,6 +66,7 @@ mod tests {
             target: None
         }));
         assert!(!command_requires_root(&Commands::Status));
+        assert!(!command_requires_root(&Commands::Control));
         assert!(!command_requires_root(&Commands::Log));
         assert!(!command_requires_root(&Commands::Completions {
             shell: Some(ClapShell::Bash)
@@ -79,6 +81,7 @@ mod tests {
     #[test]
     fn config_loading_policy_is_explicit() {
         assert!(!command_requires_config(&Commands::Status));
+        assert!(!command_requires_config(&Commands::Control));
         assert!(!command_requires_config(&Commands::Log));
         assert!(!command_requires_config(&Commands::Start));
         assert!(!command_requires_config(&Commands::Stop));

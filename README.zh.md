@@ -124,6 +124,7 @@ sudo install -m 755 target/release/mihoto /usr/local/bin/mihoto
 | 查看更新定时器状态 | `mihoto timer status` |
 | 检查 / 安装 Mihoto 升级 | `mihoto upgrade --check` / `sudo mihoto upgrade` |
 | 生成 Shell 补全 | `mihoto completions bash` / `mihoto completions zsh` / `mihoto completions fish` |
+| 预留控制器入口 | `mihoto control --help`（具体操作尚未实现） |
 
 运行 `mihoto --help` 或 `mihoto <command> --help` 查看可用选项。
 如需指定其他管理配置，在子命令前添加全局选项 `--config /absolute/path/to/config.toml`。

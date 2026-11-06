@@ -133,6 +133,7 @@ manager configuration.
 | Inspect the update timer | `mihoto timer status` |
 | Check / install a Mihoto upgrade | `mihoto upgrade --check` / `sudo mihoto upgrade` |
 | Generate shell completions | `mihoto completions bash` / `mihoto completions zsh` / `mihoto completions fish` |
+| Reserved controller entry point | `mihoto control --help` (operations are not implemented yet) |
 
 Run `mihoto --help` or `mihoto <command> --help` for available options.
 Use the global `--config /absolute/path/to/config.toml` option before the command
