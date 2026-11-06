@@ -35,15 +35,27 @@ where
                 operations.update_ui()
             })
             .await;
-        report
-            .run("core", Some("refreshing mihomo core"), || {
-                operations.update_core(options.arch)
-            })
-            .await;
+        if report.has_failures() {
+            report.record(
+                "core",
+                StageStatus::Skipped("skipped due to earlier failures".to_string()),
+            );
+        } else {
+            report
+                .run("core", Some("refreshing mihomo core"), || {
+                    operations.update_core(options.arch)
+                })
+                .await;
+        }
         if report.has_failures() {
             report.record(
                 "service restart",
                 StageStatus::Skipped("skipped due to earlier failures".to_string()),
+            );
+        } else if report.has_installed("core") {
+            report.record(
+                "service restart",
+                StageStatus::Skipped("completed transactionally with core update".to_string()),
             );
         } else {
             report
@@ -59,11 +71,10 @@ where
             })
             .await;
         if !report.has_failures() && report.has_installed("core") {
-            report
-                .run("service restart", Some("restarting mihomo.service"), || {
-                    operations.restart_service()
-                })
-                .await;
+            report.record(
+                "service restart",
+                StageStatus::Skipped("completed transactionally with core update".to_string()),
+            );
         } else if report.has_failures() {
             report.record(
                 "service restart",
@@ -224,12 +235,9 @@ mod tests {
         .unwrap();
         assert_eq!(
             *operations.calls.borrow(),
-            ["config", "geodata", "ui", "arch:None", "core", "restart"]
+            ["config", "geodata", "ui", "arch:None", "core"]
         );
-        assert_eq!(
-            log.borrow().begins,
-            ["config", "geodata", "ui", "core", "service restart"]
-        );
+        assert_eq!(log.borrow().begins, ["config", "geodata", "ui", "core"]);
     }
 
     #[tokio::test]
@@ -248,7 +256,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn all_continues_download_stages_after_failure_and_skips_restart() {
+    async fn all_continues_resource_downloads_but_skips_core_and_restart_after_failure() {
         let operations = operations(Some("geodata"), false);
         let (events, log) = events();
         let result = run(
@@ -264,10 +272,7 @@ mod tests {
             result.unwrap_err().to_string(),
             "one or more update stages failed - see summary above"
         );
-        assert_eq!(
-            *operations.calls.borrow(),
-            ["config", "geodata", "ui", "arch:None", "core"]
-        );
+        assert_eq!(*operations.calls.borrow(), ["config", "geodata", "ui"]);
         assert_eq!(
             log.borrow().summaries[0].1.last().unwrap(),
             "service restart:Skipped(\"skipped due to earlier failures\")"
@@ -280,8 +285,8 @@ mod tests {
             (
                 None,
                 false,
-                vec!["arch:Some(\"arm64\")", "core", "restart"],
-                "service restart:Installed",
+                vec!["arch:Some(\"arm64\")", "core"],
+                "service restart:Skipped(\"completed transactionally with core update\")",
                 true,
             ),
             (
@@ -364,24 +369,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restart_failure_turns_successful_core_or_all_updates_into_errors() {
-        for options in [
-            UpdateOptions {
-                core: true,
-                ..options()
-            },
-            UpdateOptions {
-                all: true,
-                ..options()
-            },
-        ] {
-            let operations = operations(Some("restart"), false);
+    async fn all_restarts_for_resources_when_core_is_current_and_propagates_restart_failure() {
+        for fail_on in [None, Some("restart")] {
+            let operations = operations(fail_on, true);
             let (events, log) = events();
-            assert!(run(&operations, options, events).await.is_err());
-            assert_eq!(
-                log.borrow().summaries[0].1.last().unwrap(),
-                "service restart:Failed(restart failed)"
-            );
+            let result = run(
+                &operations,
+                UpdateOptions {
+                    all: true,
+                    ..options()
+                },
+                events,
+            )
+            .await;
+            assert_eq!(result.is_err(), fail_on.is_some());
+            assert_eq!(operations.calls.borrow().last().unwrap(), "restart");
+            if fail_on.is_some() {
+                assert_eq!(
+                    log.borrow().summaries[0].1.last().unwrap(),
+                    "service restart:Failed(restart failed)"
+                );
+            }
         }
     }
 }

@@ -7,13 +7,14 @@ use std::fs;
 use std::os::unix::prelude::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use colored::Colorize;
 use reqwest::Client;
 use tempfile::NamedTempFile;
 
-use super::{BinaryPlan, Mihoto, StageStatus};
+use super::{BinaryPlan, Mihoto, StageStatus, SERVICE_HEALTH_DELAY};
 
 impl Mihoto {
     /// Stage 1 of the binary install: resolve the URL and download to a temp file.
@@ -54,11 +55,25 @@ impl Mihoto {
         Ok(BinaryPlan::Install(temp_file))
     }
 
-    /// Stage 2 of the binary install: stop the running service if any, then extract the
-    /// downloaded binary into place and set its executable bit.
-    ///
-    /// Must run *after* every other network-dependent stage; see [`BinaryPlan`].
+    /// Validate and replace the binary, recovering the old core and service on failure.
+    /// Init preserves a stopped service until its service-setup stage.
     pub async fn install_binary(&self, temp_file: NamedTempFile) -> Result<StageStatus> {
+        self.install_binary_with_program(
+            temp_file,
+            Path::new("systemctl"),
+            SERVICE_HEALTH_DELAY,
+            false,
+        )
+        .await
+    }
+
+    async fn install_binary_with_program(
+        &self,
+        temp_file: NamedTempFile,
+        systemctl_program: &Path,
+        health_delay: Duration,
+        activate: bool,
+    ) -> Result<StageStatus> {
         let target = Path::new(&self.mihomo_target_binary_path);
         create_parent_dir(target)?;
         let parent = target.parent().ok_or_else(|| {
@@ -77,18 +92,97 @@ impl Mihoto {
             .as_file()
             .set_permissions(fs::Permissions::from_mode(0o755))?;
         staged.as_file().sync_all()?;
+        // Linux refuses to execute a file while a writable descriptor is still open.
+        let staged = staged.into_temp_path();
 
-        // Stop mihomo.service before overwriting to avoid "Text file busy".
-        let binary_exists = target.exists();
-        if binary_exists {
-            println!(
-                "{} Stopping mihomo.service before overwriting binary...",
-                DETAIL_PREFIX.cyan()
-            );
-            Systemctl::new().stop("mihomo.service").execute()?;
+        // Reject unusable cores before touching either the installed binary or service.
+        installed_mihomo_version(staged.to_string_lossy().as_ref())?
+            .context("staged Mihomo core did not report a version")?;
+        let config_path = Path::new(&self.mihomo_target_config_path);
+        if config_path.exists() || activate {
+            self.validate_config_with_binary(&staged, config_path)?;
         }
-        staged.persist(target).map_err(|error| error.error)?;
+
+        let backup = if target.exists() {
+            let backup = NamedTempFile::new_in(parent)?;
+            fs::copy(target, backup.path())?;
+            backup.as_file().sync_all()?;
+            Some(backup)
+        } else {
+            None
+        };
+        let was_active = backup.is_some()
+            && Systemctl::is_active_with_program(systemctl_program, "mihomo.service");
+        let outcome: Result<()> = async {
+            if was_active || activate {
+                Systemctl::with_program(systemctl_program)
+                    .stop("mihomo.service")
+                    .execute()?;
+            }
+            staged.persist(target).map_err(|error| error.error)?;
+            if was_active || activate {
+                self.restart_and_verify_with_program(systemctl_program, health_delay)
+                    .await?;
+            }
+            Ok(())
+        }
+        .await;
+
+        if let Err(install_error) = outcome {
+            return match self
+                .restore_binary(backup, systemctl_program, health_delay, was_active)
+                .await
+            {
+                Ok(()) => Err(anyhow!(
+                    "Mihomo core installation failed and was rolled back: {install_error:#}"
+                )),
+                Err(recovery_error) => Err(anyhow!(
+                    "Mihomo core installation failed ({install_error:#}); rollback recovery also failed: {recovery_error:#}"
+                )),
+            };
+        }
         Ok(StageStatus::Installed)
+    }
+
+    async fn restore_binary(
+        &self,
+        backup: Option<NamedTempFile>,
+        systemctl_program: &Path,
+        health_delay: Duration,
+        was_active: bool,
+    ) -> Result<()> {
+        let stopped = Systemctl::with_program(systemctl_program)
+            .stop("mihomo.service")
+            .execute();
+        let target = Path::new(&self.mihomo_target_binary_path);
+        match backup {
+            Some(backup) => {
+                backup.persist(target).map_err(|error| {
+                    let restore_error = error.error;
+                    match error.file.keep() {
+                        Ok((_file, path)) => anyhow!(
+                            "failed to restore old core ({restore_error}); backup retained at {}",
+                            path.display()
+                        ),
+                        Err(keep_error) => anyhow!(
+                            "failed to restore old core ({restore_error}); failed to retain backup: {keep_error}"
+                        ),
+                    }
+                })?;
+            }
+            None if target.exists() => fs::remove_file(target)?,
+            None => {}
+        }
+        if was_active {
+            Systemctl::with_program(systemctl_program)
+                .reset_failed("mihomo.service")
+                .execute()?;
+            self.restart_and_verify_with_program(systemctl_program, health_delay)
+                .await
+        } else {
+            stopped?;
+            Ok(())
+        }
     }
 
     pub async fn update_core(
@@ -164,15 +258,19 @@ impl Mihoto {
         )
         .await?;
 
-        self.install_binary(temp_file).await
+        self.install_binary_with_program(
+            temp_file,
+            Path::new("systemctl"),
+            SERVICE_HEALTH_DELAY,
+            true,
+        )
+        .await
     }
 }
 
 fn installed_mihomo_version(binary_path: &str) -> Result<Option<String>> {
-    let output = Command::new(binary_path)
-        .arg("-v")
-        .output()
-        .map_err(|err| anyhow!("failed to run `{binary_path} -v`: {err}"))?;
+    let output = core_command_output(Command::new(binary_path).arg("-v"))
+        .with_context(|| format!("failed to run `{binary_path} -v`"))?;
 
     if !output.status.success() {
         return Err(anyhow!(
@@ -185,6 +283,21 @@ fn installed_mihomo_version(binary_path: &str) -> Result<Option<String>> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     Ok(extract_mihomo_version(&format!("{stdout}\n{stderr}")))
+}
+
+/// A concurrently forked process may briefly retain a writable descriptor until exec.
+/// Retry only that transient Linux error; all other execution failures are immediate.
+pub(super) fn core_command_output(command: &mut Command) -> std::io::Result<std::process::Output> {
+    let mut retries = 4;
+    loop {
+        match command.output() {
+            Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) && retries > 0 => {
+                retries -= 1;
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            result => return result,
+        }
+    }
 }
 
 fn extract_mihomo_version(output: &str) -> Option<String> {
@@ -276,7 +389,8 @@ mod tests {
     async fn prepare_and_install_downloaded_binary_then_skip_existing_target() {
         let server = MockServer::start().await;
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(b"downloaded binary").unwrap();
+        let binary = b"#!/bin/sh\nprintf 'Mihomo Meta v2.0.0\\n'\n";
+        encoder.write_all(binary).unwrap();
         let body = encoder.finish().unwrap();
         Mock::given(method("GET"))
             .and(path("/mihomo.gz"))
@@ -306,7 +420,7 @@ mod tests {
             mihoto.install_binary(handle).await.unwrap(),
             StageStatus::Installed
         ));
-        assert_eq!(fs::read(&target).unwrap(), b"downloaded binary");
+        assert_eq!(fs::read(&target).unwrap(), binary);
         assert_eq!(
             fs::metadata(&target).unwrap().permissions().mode() & 0o777,
             0o755

@@ -14,6 +14,7 @@ use colored::Colorize;
 use reqwest::Client;
 use tempfile::NamedTempFile;
 
+use super::core::core_command_output;
 use super::{Mihoto, StageStatus, SERVICE_HEALTH_DELAY};
 
 impl Mihoto {
@@ -27,19 +28,28 @@ impl Mihoto {
     }
 
     fn validate_mihomo_config(&self, config_path: &Path) -> Result<()> {
-        let output = Command::new(&self.mihomo_target_binary_path)
-            .arg("-t")
-            .arg("-d")
-            .arg(&self.mihomo_target_config_root)
-            .arg("-f")
-            .arg(config_path)
-            .output()
-            .map_err(|error| {
-                anyhow!(
-                    "failed to validate staged Mihomo config with `{}`: {error}",
-                    self.mihomo_target_binary_path
-                )
-            })?;
+        self.validate_config_with_binary(Path::new(&self.mihomo_target_binary_path), config_path)
+    }
+
+    pub(super) fn validate_config_with_binary(
+        &self,
+        binary_path: &Path,
+        config_path: &Path,
+    ) -> Result<()> {
+        let output = core_command_output(
+            Command::new(binary_path)
+                .arg("-t")
+                .arg("-d")
+                .arg(&self.mihomo_target_config_root)
+                .arg("-f")
+                .arg(config_path),
+        )
+        .map_err(|error| {
+            anyhow!(
+                "failed to validate staged Mihomo config with `{}`: {error}",
+                binary_path.display()
+            )
+        })?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -205,7 +215,7 @@ mod tests {
 }
 
 impl Mihoto {
-    async fn restart_and_verify_with_program(
+    pub(super) async fn restart_and_verify_with_program(
         &self,
         systemctl_program: &Path,
         health_delay: Duration,
